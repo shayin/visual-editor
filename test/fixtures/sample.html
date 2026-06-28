@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>测试样例</title>
+  <style>
+    body { margin: 0; padding: 40px; font-family: -apple-system, "PingFang SC", sans-serif; background: #fff; }
+    .slide { max-width: 960px; margin: 0 auto; }
+    .header { padding: 20px 0; border-bottom: 2px solid #4f8cff; margin-bottom: 30px; }
+    .kicker { font-size: 12px; color: #888; letter-spacing: 2px; }
+    .title { font-size: 28px; font-weight: 700; color: #222; margin-top: 4px; }
+    .body { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .slot { background: #f7f9fc; border-radius: 8px; padding: 20px; }
+    .slot-title { font-size: 16px; font-weight: 600; color: #4f8cff; margin-bottom: 12px; }
+    .slot-body { font-size: 14px; color: #444; line-height: 1.6; }
+    .funnel { display: flex; flex-direction: column; gap: 8px; }
+    .stage { background: #fff; border: 1px solid #e0e6ef; padding: 12px; border-radius: 6px; }
+    .stage-num { font-size: 11px; color: #aaa; }
+    .stage-text { font-size: 14px; color: #333; margin-top: 2px; }
+    .foot { text-align: center; color: #aaa; font-size: 11px; margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <div class="slide">
+    <div class="header">
+      <div class="kicker">会员基建</div>
+      <div class="title">星辰收银台：配置率 70% → 85%</div>
+    </div>
+    <div class="body">
+      <div class="slot slot-left" data-slot="left">
+        <div class="slot-title">能力概览</div>
+        <div class="slot-body">本季度完成三大模块升级，覆盖 1200+ 收银台。</div>
+      </div>
+      <div class="slot slot-right" data-slot="right">
+        <div class="slot-title">复用清单</div>
+        <div class="slot-body">
+          <div class="funnel">
+            <div class="stage"><div class="stage-num">01</div><div class="stage-text">入口收敛</div></div>
+            <div class="stage"><div class="stage-num">02</div><div class="stage-text">组件复用</div></div>
+            <div class="stage"><div class="stage-num">03</div><div class="stage-text">链路降级</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot">© 2026 内部演示</div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "ppt-visual-editor",
+  "version": "0.1.0",
+  "description": "可视化协同修改 PPT HTML 的工具：左侧渲染 + 点选元素 + 右侧内嵌 Claude Code 终端",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "restart": "lsof -ti:7788 | xargs kill -9 2>/dev/null; node server.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
+    "chokidar": "^3.6.0",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "jsdom": "^29.1.1"
+  }
+}
