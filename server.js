@@ -351,11 +351,8 @@ setInterval(monitorPtyMem, 15000);
 wss.on('connection', (ws) => {
   clients.add(ws);
   ensurePty();
-  // 回放历史 pty 输出，让新 client 不至于看到空白终端
-  if (ptyOutputBuf.length) {
-    const replay = ptyOutputBuf.join('');
-    try { ws.send(JSON.stringify({ type: 'pty:out', data: replay })); } catch {}
-  }
+  // 历史回放不再立即发——等前端 fit + resize 后主动请求
+  // 避免新 client cols 还没就绪时写入历史导致换行错位
 
   ws.on('message', (raw) => {
     let msg;
@@ -364,6 +361,12 @@ wss.on('connection', (ws) => {
       if (ptyProc) ptyProc.write(msg.data);
     } else if (msg.type === 'pty:resize') {
       if (ptyProc) ptyProc.resize(msg.cols || 100, msg.rows || 30);
+    } else if (msg.type === 'pty:replay-request') {
+      // 前端已完成 fit + resize，回放历史输出
+      if (ptyOutputBuf.length) {
+        const replay = ptyOutputBuf.join('');
+        try { ws.send(JSON.stringify({ type: 'pty:out', data: replay })); } catch {}
+      }
     } else if (msg.type === 'pty:restart') {
       if (ptyProc) {
         try { ptyProc.kill(); } catch {}

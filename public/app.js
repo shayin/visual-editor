@@ -132,6 +132,16 @@ function connectWs() {
     wsDot.className = 'status-dot connected';
     wsStatus.textContent = '已连接';
     if (state.currentFile) sendWs({ type: 'watch', file: state.currentFile });
+    // 关键：先 fit 让 xterm 拿到正确 cols/rows → onResize 同步 sendResize 给 pty
+    // → reset 清掉默认空状态 → 再请求 replay，避免历史按旧 cols 写入新 xterm 导致错位
+    try { fitAddon.fit(); } catch {}
+    // 双层保险：rAF 内再 fit 一次（容器可能还没渲染完），然后 reset + 请求 replay
+    requestAnimationFrame(() => {
+      try { fitAddon.fit(); } catch {}
+      term.reset();
+      // 给 pty resize 一点时间生效，再请求历史
+      setTimeout(() => sendWs({ type: 'pty:replay-request' }), 30);
+    });
   });
   ws.addEventListener('close', () => {
     state.wsReady = false;
