@@ -263,6 +263,33 @@ app.get('/api/workspace', (req, res) => {
   res.json({ workspace: WORKSPACE_DIR, backup: BACKUP_DIR, keep: BACKUP_KEEP });
 });
 
+// 图片上传：base64 JSON → 写入 HTML 同目录，命名 pasted-<ts>-<rand>.<ext>
+app.post('/api/upload-image', (req, res) => {
+  const { file, image, mime } = req.body || {};
+  if (!file || !image) return res.status(400).json({ error: 'missing file/image' });
+  const htmlAbs = path.resolve(String(file));
+  if (!fs.existsSync(htmlAbs)) return res.status(404).json({ error: 'html not found: ' + htmlAbs });
+  const dir = path.dirname(htmlAbs);
+  if (!fs.statSync(dir).isDirectory()) return res.status(404).json({ error: 'invalid dir' });
+  const extMap = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+    'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/bmp': 'bmp',
+  };
+  const ext = extMap[mime] || 'png';
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const rand = Math.random().toString(36).slice(2, 8);
+  const filename = `pasted-${ts}-${rand}.${ext}`;
+  const absPath = path.join(dir, filename);
+  const b64 = String(image).replace(/^data:[^;]+;base64,/, '');
+  try {
+    fs.writeFileSync(absPath, Buffer.from(b64, 'base64'));
+  } catch (e) {
+    return res.status(403).json({ error: '写入失败（可能目录不可写）: ' + e.message });
+  }
+  console.log(`[upload-image] wrote ${absPath} (${(fs.statSync(absPath).size / 1024).toFixed(1)}KB)`);
+  res.json({ ok: true, absPath, relativePath: filename, filename, size: fs.statSync(absPath).size });
+});
+
 const server = http.createServer(app);
 
 // WebSocket：一个端点同时承载终端数据 & 选区事件

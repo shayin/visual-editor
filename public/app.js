@@ -13,12 +13,14 @@ const state = {
   markTool: 'rect',   // rect / text
   markColor: '#ef4444',
   markStrokeWidth: 2,
+  pendingImages: [],   // 粘贴/拖拽上传的待放置图片：{ id, absPath, relativePath, filename, dataUrl, ts }
+  activeImageSrc: null, // mark image 工具当前关联的图片 relativePath
+  currentInspectorSel: null, // Inspector 当前选中的元素（pendingBar 替换/关联用）
   mode: 'point',
   inspectorOpen: false,
   settings: loadSettings(),
   recent: loadRecent(),
   wsReady: false,
-  currentInspectorSel: null,
 };
 
 function loadSettings() {
@@ -258,7 +260,40 @@ term.attachCustomKeyEventHandler((ev) => {
 term.onData((data) => sendWs({ type: 'pty:in', data }));
 term.onResize(({ cols, rows }) => sendWs({ type: 'pty:resize', cols, rows }));
 
-window.addEventListener('resize', () => fitAddon.fit());
+let _resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (fitAddon) fitAddon.fit();
+  // debounce：等 viewport 稳定后再算（防止 F12 开关、窗口拖动中途取到错误尺寸）
+  if (_resizeTimer) clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(fitPreviewScale, 80);
+});
+
+// 让 iframe 内部 PPT 内容按比例缩放到视口内（内容超出时整体缩小，保证完全可见）
+function fitPreviewScale() {
+  const iframe = $('#previewIframe');
+  if (!iframe) return;
+  let doc;
+  try { doc = iframe.contentDocument; } catch (e) { return; }
+  if (!doc || !doc.documentElement) return;
+  const html = doc.documentElement;
+  // 重置以便取真实自然尺寸
+  html.style.transform = '';
+  html.style.transformOrigin = '';
+  html.style.overflow = '';
+  void html.offsetHeight; // 强制 reflow
+  const innerW = Math.max(html.scrollWidth, doc.body?.scrollWidth || 0);
+  const innerH = Math.max(html.scrollHeight, doc.body?.scrollHeight || 0);
+  const viewW = iframe.clientWidth;
+  const viewH = iframe.clientHeight;
+  if (innerW <= 0 || innerH <= 0 || viewW <= 0 || viewH <= 0) return;
+  // 按最小比例缩放，保证完全可见，不放大
+  const scale = Math.min(viewW / innerW, viewH / innerH, 1);
+  if (scale < 0.99) {
+    html.style.transformOrigin = 'top left';
+    html.style.transform = `scale(${scale})`;
+    html.style.overflow = 'hidden';
+  }
+}
 
 // ============ File loading ============
 function loadFile(file) {
@@ -283,6 +318,8 @@ function loadFile(file) {
           iframeEl.contentWindow.postMessage({ type: 'ppt-ve-mode', mode: state.mode }, '*');
           iframeEl.contentWindow.postMessage({ type: 'ppt-ve-redraw-marks', marks: state.marks }, '*');
         }
+        // iframe 内容加载完后尝试缩放（首次填充视口）
+        setTimeout(fitPreviewScale, 50);
       });
     }
     updateModeHint();
@@ -304,6 +341,146 @@ fileInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadFile(f
 fileInput.addEventListener('paste', () => {
   // 粘贴后稍等 value 更新再加载
   setTimeout(() => loadFile(fileInput.value.trim()), 0);
+});
+
+// ============ 图片粘贴 / 拖拽上传 ============
+async function uploadImage(file) {
+  if (!state.currentFile) { toast({ type: 'error', msg: '请先加载 HTML 文件' }); return; }
+  if (!file || !file.type.startsWith('image/')) return;
+  if (state.pendingImages.length >= 10) {
+    toast({ type: 'warning', msg: '待放置图片已达 10 张上限，请先用掉一些', duration: 2500 });
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const dataUrl = reader.result;
+    try {
+      const r = await fetch('/api/upload-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: state.currentFile, image: dataUrl, mime: file.type }),
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || '上传失败');
+      state.pendingImages.unshift({
+        id: 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        absPath: j.absPath,
+        relativePath: j.relativePath,
+        filename: j.filename,
+        dataUrl,
+        ts: Date.now(),
+      });
+      renderPendingBar();
+      toast({ type: 'success', title: '图片已上传', msg: j.filename, duration: 2000 });
+    } catch (e) {
+      toast({ type: 'error', title: '上传失败', msg: e.message, duration: 4000 });
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+// 全局粘贴：从剪贴板抓图片（不抢 fileInput 的路径粘贴）
+window.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items || [];
+  for (const it of items) {
+    if (it.kind === 'file' && it.type.startsWith('image/')) {
+      const f = it.getAsFile();
+      if (f) {
+        e.preventDefault();
+        uploadImage(f);
+        return;
+      }
+    }
+  }
+});
+
+// previewWrap 拖拽上传（图片文件）
+function hasImageFiles(e) {
+  return [...(e.dataTransfer?.files || [])].some((f) => f.type.startsWith('image/'));
+}
+previewWrap?.addEventListener('dragover', (e) => { if (hasImageFiles(e)) e.preventDefault(); });
+previewWrap?.addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/'));
+  if (!files.length) return;
+  e.preventDefault();
+  files.forEach(uploadImage);
+});
+
+// ============ pendingBar 浮窗 ============
+function renderPendingBar() {
+  const bar = $('#pendingBar');
+  if (!bar) return;
+  if (!state.pendingImages.length) {
+    bar.classList.remove('open');
+    bar.innerHTML = '';
+    return;
+  }
+  bar.classList.add('open');
+  const cards = state.pendingImages.map((img) => {
+    const isImgEl = state.currentInspectorSel && /^\s*<img[\s>]/i.test(state.currentInspectorSel.elementHtml || '');
+    const hasSel = !!state.currentInspectorSel;
+    return `
+      <div class="pending-card" data-id="${img.id}">
+        <div class="pending-thumb" style="background-image:url('${img.dataUrl}')"></div>
+        <div class="pending-info">
+          <div class="pending-name" title="${img.filename}">${img.filename}</div>
+          <div class="pending-actions">
+            <button class="pa-btn" data-act="paint" title="切到 mark 模式拖框放置">画板</button>
+            <button class="pa-btn" data-act="replace" ${isImgEl ? '' : 'disabled'} title="${isImgEl ? '替换当前选中 img 的 src' : '需先点选一个 img 元素'}">替换</button>
+            <button class="pa-btn" data-act="attach" ${hasSel ? '' : 'disabled'} title="${hasSel ? '在该元素附近/上方插入新 img' : '需先点选一个元素'}">关联</button>
+            <button class="pa-btn" data-act="copy" title="复制相对路径">路径</button>
+            <button class="pa-btn danger" data-act="del" title="移出待放置列表（不删文件）">×</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+  bar.innerHTML = `<div class="pending-head">待放置图片 <span class="pending-count">${state.pendingImages.length}</span></div>${cards}`;
+}
+
+// 事件委托
+$('#pendingBar')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.pa-btn');
+  if (!btn) return;
+  const card = btn.closest('.pending-card');
+  if (!card) return;
+  const id = card.dataset.id;
+  const img = state.pendingImages.find((x) => x.id === id);
+  if (!img) return;
+  const act = btn.dataset.act;
+  if (act === 'paint') {
+    state.activeImageSrc = img.relativePath;
+    setMode('mark');
+    // 自动切到 image 工具
+    state.markTool = 'image';
+    $$('#markToolbar .mark-tool-btn').forEach((b) => b.classList.toggle('active', b.dataset.tool === 'image'));
+    sendMarkToolConfig();
+    // 推送当前 image src 给 overlay
+    $('#previewIframe')?.contentWindow?.postMessage({ type: 'ppt-ve-mark-image-src', src: img.relativePath }, '*');
+    toast({ type: 'info', msg: `已选图：${img.filename}，在画板拖框放置`, duration: 2500 });
+  } else if (act === 'replace') {
+    if (!state.currentInspectorSel) { toast({ type: 'error', msg: '请先点选一个 <img> 元素' }); return; }
+    if (!/^\s*<img[\s>]/i.test(state.currentInspectorSel.elementHtml || '')) {
+      toast({ type: 'error', msg: '选中的不是 img 元素' }); return;
+    }
+    addSelection({ ...state.currentInspectorSel, mode: 'inspect', replaceImage: img.relativePath });
+    toast({ type: 'success', title: '替换卡片已入队', msg: `src → ${img.relativePath}`, duration: 2500 });
+  } else if (act === 'attach') {
+    if (!state.currentInspectorSel) { toast({ type: 'error', msg: '请先点选一个元素' }); return; }
+    const mode = prompt('放置方式：输入 1 = 叠加在元素上方 / 2 = 放在元素周围（作为兄弟节点）', '2');
+    if (mode !== '1' && mode !== '2') return;
+    addSelection({
+      ...state.currentInspectorSel,
+      mode: 'inspect',
+      attachImage: img.relativePath,
+      attachMode: mode === '1' ? 'overlay' : 'around',
+    });
+    toast({ type: 'success', title: '关联卡片已入队', msg: `${mode === '1' ? '叠加' : '周围'}：${img.filename}`, duration: 2500 });
+  } else if (act === 'copy') {
+    navigator.clipboard.writeText(img.relativePath).then(() => toast({ type: 'success', msg: '已复制: ' + img.relativePath, duration: 1500 }));
+  } else if (act === 'del') {
+    state.pendingImages = state.pendingImages.filter((x) => x.id !== id);
+    renderPendingBar();
+  }
 });
 
 copyPathBtn.addEventListener('click', async () => {
@@ -507,6 +684,22 @@ window.addEventListener('message', (ev) => {
     console.log('[overlay]', p.msg);
     return;
   }
+  if (p.type === 'ppt-ve-image-paste') {
+    // iframe 内 paste 转发过来的图片（dataUrl），还原成 File 走上传流程
+    try {
+      const arr = p.dataUrl.split(',');
+      const mimeMatch = arr[0].match(/data:([^;]+);base64/);
+      const mime = mimeMatch ? mimeMatch[1] : (p.mime || 'image/png');
+      const bstr = atob(arr[1]);
+      const u8 = new Uint8Array(bstr.length);
+      for (let i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
+      const file = new File([u8], p.filename || 'pasted.png', { type: mime });
+      uploadImage(file);
+    } catch (err) {
+      toast({ type: 'error', msg: '粘贴解析失败: ' + err.message });
+    }
+    return;
+  }
   if (p.type === 'mark:created') {
     state.marks.push(p.mark);
     saveMarks(state.currentFile, state.marks);
@@ -580,6 +773,8 @@ function renderQueue() {
     } else {
       anchor = s.selector?.anchor || '—';
       modeTag = s.mode === 'rect' ? ' · rect' : s.mode === 'text' ? ' · text' : '';
+      if (s.replaceImage) modeTag += ' · 🖼替换';
+      if (s.attachImage) modeTag += ` · 🖼${s.attachMode === 'overlay' ? '叠加' : '关联'}`;
       text = s.selectedText || s.text || (s.elementHtml || '').replace(/<[^>]+>/g, '').trim().slice(0, 60);
     }
     card.innerHTML = `
@@ -702,6 +897,20 @@ function buildContextPacket(s) {
     lines.push('  </pseudo-elements>');
   }
   lines.push('</target>');
+  // 图片操作：替换 src / 关联插入新 img
+  if (s.replaceImage) {
+    lines.push('');
+    lines.push(`🖼 把选中元素的 src 替换为：${s.replaceImage}`);
+    lines.push(`   路径已存在于 HTML 同目录，直接改 src 即可`);
+  }
+  if (s.attachImage) {
+    lines.push('');
+    lines.push(`🖼 在选中元素${s.attachMode === 'overlay' ? '上方叠加' : '周围（作为相邻元素）'}新增一张 <img src="${s.attachImage}">`);
+    lines.push(`   插入策略：${s.attachMode === 'overlay'
+      ? '用绝对定位 absolute 盖在选中元素上方（按元素尺寸自适应）'
+      : '作为选中元素的兄弟节点插入（前后看布局语义决定）'}`);
+    lines.push(`   尺寸：${s.attachMode === 'overlay' ? '撑满选中元素' : '按图片自然比例，参考周围元素大小'}`);
+  }
   return lines.join('\n');
 }
 
@@ -723,12 +932,20 @@ function buildMarkPacket(file, marks) {
     } else if (m.type === 'pen' && Array.isArray(m.points)) {
       const pts = m.points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
       lines.push(`  <pen stroke="${m.stroke || '#ef4444'}" points="${pts}" />`);
+    } else if (m.type === 'image') {
+      lines.push(`  <image src="${m.src}" rect="${Math.round(m.x)},${Math.round(m.y)},${Math.round(m.w)},${Math.round(m.h)}" />`);
     }
   }
   lines.push(`</annotations>`);
   lines.push('');
   lines.push(`坐标说明：x,y 是相对浏览器视口左上角的像素位置；rect 是 "左上x,左上y,宽,高"。`);
   lines.push(`请根据这些坐标定位空白区域，参考附近已有元素的位置和布局，在该位置做我接下来要的修改。`);
+  const hasImage = marks.some((m) => m.type === 'image');
+  if (hasImage) {
+    lines.push(``);
+    lines.push(`🖼 关于 image 标记：src 是相对 HTML 文件的图片路径（图片已存在于 HTML 同目录），rect 是要插入的新 <img> 在视口里的目标位置和尺寸。`);
+    lines.push(`   请在该位置新建一个 <img src="..."> 元素，宽高用 rect 的 w,h；定位用 absolute 或视布局而定，让 img 占据该区域。`);
+  }
   return lines.join('\n');
 }
 
@@ -761,6 +978,7 @@ function showInspector(s) {
     $('#inspPseudoRow').style.display = 'none';
   }
   if (!state.inspectorOpen) toggleInspector(true);
+  renderPendingBar(); // 让 pendingBar 的替换/关联按钮 disabled 状态跟随
 }
 function toggleInspector(force) {
   const open = force !== undefined ? force : !state.inspectorOpen;
@@ -1129,6 +1347,8 @@ function serializeMarksToSvg(marks) {
     } else if (m.type === 'pen' && Array.isArray(m.points) && m.points.length >= 2) {
       const pts = m.points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
       parts.push(`<polyline${ns} points="${pts}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" />`);
+    } else if (m.type === 'image' && m.src) {
+      parts.push(`<image${ns} x="${Math.round(m.x)}" y="${Math.round(m.y)}" width="${Math.round(m.w)}" height="${Math.round(m.h)}" preserveAspectRatio="none" href="${m.src}" xlink:href="${m.src}" />`);
     }
   }
   return parts.join('\n    ');
@@ -1164,10 +1384,68 @@ $('#clearSelBtn').addEventListener('click', () => {
   toast({ type: 'info', msg: '已清除高亮', duration: 1200 });
 });
 
+$('#fitPreviewBtn').addEventListener('click', () => {
+  // 强制重算预览缩放，应对 F12 开关后视觉未恢复等边缘场景
+  fitPreviewScale();
+  toast({ type: 'info', msg: '已重新适应窗口', duration: 1500 });
+});
+
 // ============ Queue drawer ============
-function openQueue() { queueDrawer.classList.add('open'); }
-function closeQueue() { queueDrawer.classList.remove('open'); }
-$('#queueToggle').addEventListener('click', () => queueDrawer.classList.toggle('open'));
+const appShell = document.querySelector('.app');
+const mainEl = document.getElementById('main');
+const queueDrawerEl = document.getElementById('queueDrawer');
+const TOPBAR_H = 48, STATUSBAR_H = 26, QUEUE_H = 168;
+
+function applyQueueLayout(open) {
+  // 直接 inline style 控制 .main 和 queue-drawer 的高度
+  // 绕过所有 CSS 优先级/缓存问题
+  if (open) {
+    mainEl.style.height = `calc(100vh - ${TOPBAR_H}px - ${QUEUE_H}px - ${STATUSBAR_H}px)`;
+    queueDrawerEl.style.height = QUEUE_H + 'px';
+  } else {
+    mainEl.style.height = `calc(100vh - ${TOPBAR_H}px - ${STATUSBAR_H}px)`;
+    queueDrawerEl.style.height = '0px';
+  }
+  // 等 main 的 height transition 结束后再 fit xterm
+  // 双重保险：transitionend + setTimeout fallback（防止 transitionend 不触发）
+  const doFit = () => {
+    if (fitAddon && term) {
+      try { fitAddon.fit(); }
+      catch (e) { console.error('[queue-layout] fit failed:', e); }
+    } else {
+      console.warn('[queue-layout] fitAddon or term not ready');
+    }
+    // 同步让 iframe 内部 PPT 按新视口比例缩放
+    fitPreviewScale();
+  };
+  let done = false;
+  const onEnd = (e) => {
+    if (done || e.propertyName !== 'height') return;
+    done = true;
+    mainEl.removeEventListener('transitionend', onEnd);
+    doFit();
+  };
+  mainEl.addEventListener('transitionend', onEnd);
+  // fallback：transition 时长 200ms + 60ms 缓冲
+  setTimeout(() => {
+    if (done) return;
+    done = true;
+    mainEl.removeEventListener('transitionend', onEnd);
+    doFit();
+  }, 260);
+}
+
+let queueOpen = false;
+function toggleQueue() {
+  queueOpen = !queueOpen;
+  applyQueueLayout(queueOpen);
+}
+function openQueue() { queueOpen = true; applyQueueLayout(true); }
+function closeQueue() { queueOpen = false; applyQueueLayout(false); }
+
+// 初始化：默认收起
+applyQueueLayout(false);
+$('#queueToggle').addEventListener('click', toggleQueue);
 $('#queueCloseBtn').addEventListener('click', closeQueue);
 $('#queueClearBtn').addEventListener('click', () => {
   // pinned 的保留
@@ -1319,7 +1597,7 @@ document.addEventListener('keydown', (ev) => {
   // Cmd+系列
   switch (ev.key.toLowerCase()) {
     case 'b': ev.preventDefault(); $('#sidebarToggle').click(); break;
-    case 'j': ev.preventDefault(); queueDrawer.classList.toggle('open'); break;
+    case 'j': ev.preventDefault(); queueOpen ? closeQueue() : openQueue(); break;
     case 'i': ev.preventDefault(); toggleInspector(); break;
     case 'd': ev.preventDefault(); $('#themeToggle').click(); break;
     case 'r': ev.preventDefault(); $('#refreshBtn').click(); break;

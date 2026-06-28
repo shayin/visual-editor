@@ -116,10 +116,13 @@ input, select, textarea { font-family: inherit; color: inherit; }
    App Shell
    ============================================================ */
 .app {
-  display: grid;
-  grid-template-rows: var(--topbar-h) 1fr var(--statusbar-h);
+  display: flex;
+  flex-direction: column;
   height: 100vh;
 }
+.app > .topbar { flex-shrink: 0; }
+.app > .main { flex: 0 1 auto; min-height: 0; transition: height var(--t-base); }
+.app > .statusbar { flex-shrink: 0; }
 
 /* ============================================================
    TopBar
@@ -127,6 +130,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .topbar {
   display: flex; align-items: center; gap: var(--sp-3);
   padding: 0 var(--sp-4);
+  height: var(--topbar-h);
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
   position: relative; z-index: 50;
@@ -496,20 +500,99 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .mark-color-input:focus { border-color: var(--accent); }
 
 /* ============================================================
+   Pending Images Bar (粘贴/拖拽上传的待放置图片)
+   ============================================================ */
+.pending-bar {
+  position: fixed;
+  top: 70px;
+  right: 20px;
+  width: 260px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  z-index: 50;
+  display: none;
+  padding: 8px;
+}
+.pending-bar.open { display: block; }
+.pending-head {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 6px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.pending-count {
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.pending-card {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: var(--r-sm);
+  margin-bottom: 4px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+}
+.pending-card:hover { background: var(--bg-surface-3); }
+.pending-thumb {
+  flex: 0 0 56px;
+  width: 56px;
+  height: 56px;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-color: var(--bg-base);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-subtle);
+}
+.pending-info { flex: 1; min-width: 0; }
+.pending-name {
+  font: 10px var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 4px;
+}
+.pending-actions { display: flex; flex-wrap: wrap; gap: 3px; }
+.pa-btn {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--bg-surface-3);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.pa-btn:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
+.pa-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pa-btn.danger { color: #ef4444; border-color: #ef4444; }
+.pa-btn.danger:hover { background: #ef4444; color: #fff; }
+
+/* ============================================================
    Bottom Selection Queue Drawer
    ============================================================ */
 .queue-drawer {
-  position: fixed; left: 0; right: 0;
-  bottom: var(--statusbar-h);
-  z-index: 40;
+  height: 0;
   background: var(--bg-surface);
   border-top: 1px solid var(--border);
-  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.3);
   display: flex; flex-direction: column;
-  height: 0; overflow: hidden;
+  flex-shrink: 0;
+  overflow: hidden;
+  min-height: 0;
   transition: height var(--t-base);
 }
-.queue-drawer.open { height: var(--queue-h); }
 .queue-head {
   display: flex; align-items: center; gap: var(--sp-3);
   padding: 8px var(--sp-4); border-bottom: 1px solid var(--border-subtle);
@@ -592,6 +675,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .statusbar {
   display: flex; align-items: center; gap: var(--sp-4);
   padding: 0 var(--sp-4);
+  height: var(--statusbar-h);
   background: var(--bg-surface);
   border-top: 1px solid var(--border-subtle);
   font-size: 10px; color: var(--text-muted);

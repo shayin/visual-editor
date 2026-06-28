@@ -549,6 +549,11 @@
       markColor = d.color || markColor;
       markStrokeWidth = d.strokeWidth || markStrokeWidth;
       applyMarkCursor();
+    } else if (d.type === 'ppt-ve-mark-image-src') {
+      currentImageSrc = d.src;
+      // 自动切到 image 工具
+      markTool = 'image';
+      applyMarkCursor();
     } else if (d.type === 'ppt-ve-redraw-marks') {
       marks = Array.isArray(d.marks) ? d.marks : [];
       renderMarks();
@@ -564,6 +569,31 @@
 
   console.log('[ppt-ve] overlay loaded. mode=point');
 
+  // ============ Paste 图片转发（iframe 内 paste 不冒泡到父窗口） ============
+  window.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items || [];
+    for (const it of items) {
+      if (it.kind === 'file' && it.type.startsWith('image/')) {
+        const f = it.getAsFile();
+        if (f) {
+          e.preventDefault();
+          // 把图片转 base64 转发给父窗口（避免 File 对象无法跨 window 传递）
+          const reader = new FileReader();
+          reader.onload = () => {
+            window.parent.postMessage({
+              type: 'ppt-ve-image-paste',
+              dataUrl: reader.result,
+              mime: f.type,
+              filename: f.name || 'pasted.png',
+            }, '*');
+          };
+          reader.readAsDataURL(f);
+          return;
+        }
+      }
+    }
+  });
+
   // ============ Mark Board（画板层） ============
   // 进入 mark 模式时注入顶层 SVG 画板，支持矩形/文字（Phase A）
   // 箭头/画笔在 Phase B 加
@@ -571,6 +601,7 @@
   let markTool = 'rect';
   let markColor = '#ef4444';
   let markStrokeWidth = 2;
+  let currentImageSrc = null; // mark image 工具当前关联的图片 src
   let marks = []; // 数据模型
   let drawing = false;
   let drawStart = null;
@@ -632,7 +663,7 @@
 
   function applyMarkCursor() {
     if (!markBoard) return;
-    const cursors = { rect: 'crosshair', text: 'text', arrow: 'crosshair', pen: 'crosshair' };
+    const cursors = { rect: 'crosshair', text: 'text', arrow: 'crosshair', pen: 'crosshair', image: 'crosshair' };
     markBoard.style.cursor = cursors[markTool] || 'crosshair';
   }
 
@@ -644,6 +675,18 @@
   function onMarkMouseDown(ev) {
     if (!markBoard || !markBoard.classList.contains('active')) return;
     if (ev.button !== 0) return;
+    // Option/Alt + 点击：临时穿透 markBoard，选取底层元素（复用 point 模式的 selectElement）
+    if (ev.altKey) {
+      ev.preventDefault(); ev.stopPropagation();
+      const x = ev.clientX, y = ev.clientY;
+      markBoard.style.pointerEvents = 'none';
+      const realTarget = document.elementFromPoint(x, y);
+      markBoard.style.pointerEvents = '';
+      if (realTarget && realTarget !== markBoard && realTarget !== document.body && realTarget !== document.documentElement) {
+        selectElement(realTarget, null, ev);
+      }
+      return;
+    }
     const p = svgPt(ev);
     const ns = 'http://www.w3.org/2000/svg';
     if (markTool === 'text') {
@@ -668,7 +711,7 @@
     drawing = true;
     drawStart = p;
     draftPoints = null;
-    if (markTool === 'rect') {
+    if (markTool === 'rect' || markTool === 'image') {
       draftEl = document.createElementNS(ns, 'rect');
       draftEl.setAttribute('x', p.x);
       draftEl.setAttribute('y', p.y);
@@ -703,7 +746,7 @@
   function onMarkMouseMove(ev) {
     if (!drawing) return;
     const p = svgPt(ev);
-    if (markTool === 'rect' && draftEl && drawStart) {
+    if ((markTool === 'rect' || markTool === 'image') && draftEl && drawStart) {
       const x = Math.min(drawStart.x, p.x);
       const y = Math.min(drawStart.y, p.y);
       const w = Math.abs(p.x - drawStart.x);
@@ -757,6 +800,19 @@
         pushUndo();
         marks.push(m);
         notifyMarkCreated(m);
+      }
+    } else if (markTool === 'image' && draftEl && drawStart) {
+      const x = Math.min(drawStart.x, p.x);
+      const y = Math.min(drawStart.y, p.y);
+      const w = Math.abs(p.x - drawStart.x);
+      const h = Math.abs(p.y - drawStart.y);
+      if (w >= 20 && h >= 20 && currentImageSrc) {
+        const m = { id: baseId, type: 'image', x, y, w, h, src: currentImageSrc, ts: Date.now() };
+        pushUndo();
+        marks.push(m);
+        notifyMarkCreated(m);
+      } else if (!currentImageSrc) {
+        window.parent.postMessage({ type: 'ppt-ve-debug', msg: 'image 工具未关联图片 src（需先在 pendingBar 点画板）' }, '*');
       }
     }
     if (draftEl && draftEl.parentNode) draftEl.parentNode.removeChild(draftEl);
@@ -820,6 +876,8 @@
         t.x = o.x + dx; t.y = o.y + dy;
       } else if (t.type === 'text') {
         t.x = o.x + dx; t.y = o.y + dy;
+      } else if (t.type === 'image') {
+        t.x = o.x + dx; t.y = o.y + dy;
       } else if (t.type === 'arrow') {
         t.x1 = o.x1 + dx; t.y1 = o.y1 + dy;
         t.x2 = o.x2 + dx; t.y2 = o.y2 + dy;
@@ -833,6 +891,39 @@
       window.removeEventListener('mouseup', onUp);
       if (dragMove) notifyMarkSync();
       dragMove = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // —— 拖拽缩放标记（仅 image / rect，右下角 handle）——
+  let dragResize = null; // { mark, startMouse, origMark }
+  function startResize(ev, m) {
+    selectedMarkId = m.id;
+    pushUndo();
+    dragResize = {
+      mark: m,
+      startMouse: { x: ev.clientX, y: ev.clientY },
+      origMark: JSON.parse(JSON.stringify(m)),
+    };
+    const onMove = (e) => {
+      if (!dragResize) return;
+      const dx = e.clientX - dragResize.startMouse.x;
+      const dy = e.clientY - dragResize.startMouse.y;
+      const o = dragResize.origMark;
+      const t = dragResize.mark;
+      const minSize = 20;
+      if (t.type === 'image' || t.type === 'rect') {
+        t.w = Math.max(minSize, o.w + dx);
+        t.h = Math.max(minSize, o.h + dy);
+      }
+      renderMarks();
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (dragResize) notifyMarkSync();
+      dragResize = null;
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -901,6 +992,48 @@
       poly.setAttribute('stroke-linecap', 'round');
       poly.setAttribute('stroke-linejoin', 'round');
       return poly;
+    }
+    if (m.type === 'image' && m.src) {
+      const g = document.createElementNS(ns, 'g');
+      const img = document.createElementNS(ns, 'image');
+      img.setAttribute('x', m.x);
+      img.setAttribute('y', m.y);
+      img.setAttribute('width', m.w);
+      img.setAttribute('height', m.h);
+      img.setAttribute('preserveAspectRatio', 'none');
+      img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', m.src);
+      img.setAttribute('href', m.src);
+      g.appendChild(img);
+      // 虚线边框便于辨识
+      const border = document.createElementNS(ns, 'rect');
+      border.setAttribute('x', m.x);
+      border.setAttribute('y', m.y);
+      border.setAttribute('width', m.w);
+      border.setAttribute('height', m.h);
+      border.setAttribute('fill', 'none');
+      border.setAttribute('stroke', '#3b82f6');
+      border.setAttribute('stroke-width', '1');
+      border.setAttribute('stroke-dasharray', '4 2');
+      g.appendChild(border);
+      // 右下角 resize handle（蓝色实心方块）
+      const hs = 8;
+      const handle = document.createElementNS(ns, 'rect');
+      handle.setAttribute('x', m.x + m.w - hs / 2);
+      handle.setAttribute('y', m.y + m.h - hs / 2);
+      handle.setAttribute('width', hs);
+      handle.setAttribute('height', hs);
+      handle.setAttribute('fill', '#3b82f6');
+      handle.setAttribute('stroke', '#fff');
+      handle.setAttribute('stroke-width', '1');
+      handle.style.cursor = 'nwse-resize';
+      handle.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        if (!markBoard.classList.contains('active')) return;
+        e.stopPropagation();
+        startResize(e, m);
+      });
+      g.appendChild(handle);
+      return g;
     }
     return null;
   }
