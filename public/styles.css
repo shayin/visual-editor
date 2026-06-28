@@ -396,6 +396,75 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .terminal-wrap .xterm { padding: var(--sp-2); height: 100%; }
 .terminal-wrap .xterm-viewport { background-color: var(--bg-base) !important; }
 
+/* ============ Mark Toolbar (浮动工具条) ============ */
+.mark-toolbar {
+  position: fixed;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: none;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+}
+.mark-toolbar.open { display: flex; }
+.mark-tools { display: flex; gap: 4px; }
+.mark-tool-btn {
+  width: 28px; height: 28px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.mark-tool-btn:hover { background: var(--bg-surface-3); color: var(--text-primary); }
+.mark-tool-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.mark-colors { display: flex; gap: 4px; }
+.mark-color-btn {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+}
+.mark-color-btn.active { border-color: var(--text-primary); box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 3px var(--accent); }
+.mark-stroke {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.mark-divider { width: 1px; height: 20px; background: var(--border-subtle); }
+.mark-count { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); padding: 0 4px; }
+.mark-action {
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 11px;
+}
+.mark-action:hover { background: var(--bg-surface-3); }
+.mark-action.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.mark-action.primary:hover { background: var(--accent-hover); }
+.mark-action.success { background: #10b981; color: #fff; border-color: #10b981; }
+.mark-action.success:hover { background: #059669; }
+.mark-action.danger { background: transparent; color: #ef4444; border-color: #ef4444; }
+.mark-action.danger:hover { background: #ef4444; color: #fff; }
+.mark-action svg { vertical-align: -2px; margin-right: 3px; }
+
 /* ============================================================
    Bottom Selection Queue Drawer
    ============================================================ */

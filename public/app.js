@@ -9,6 +9,10 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   currentFile: null,
   selections: [],
+  marks: [],          // 画板标记，按文件持久化到 localStorage
+  markTool: 'rect',   // rect / text
+  markColor: '#ef4444',
+  markStrokeWidth: 2,
   mode: 'point',
   inspectorOpen: false,
   settings: loadSettings(),
@@ -164,7 +168,16 @@ function connectWs() {
         wsDot.className = 'status-dot refreshing';
         wsStatus.textContent = '文件变化,刷新中';
         setTimeout(() => {
-          $('#previewIframe').src = `/api/render?file=${encodeURIComponent(state.currentFile)}&t=${Date.now()}`;
+          const ifr = $('#previewIframe');
+          // reload 后需要重新注入 marks（mark mode 下）
+          ifr.addEventListener('load', function once() {
+            ifr.removeEventListener('load', once);
+            if (ifr.contentWindow) {
+              ifr.contentWindow.postMessage({ type: 'ppt-ve-mode', mode: state.mode }, '*');
+              ifr.contentWindow.postMessage({ type: 'ppt-ve-redraw-marks', marks: state.marks }, '*');
+            }
+          });
+          ifr.src = `/api/render?file=${encodeURIComponent(state.currentFile)}&t=${Date.now()}`;
           wsDot.className = 'status-dot connected';
           wsStatus.textContent = '已连接';
         }, 150); // 让写盘完成
@@ -249,6 +262,19 @@ function loadFile(file) {
     previewWrap.classList.remove('no-file');
     previewWrap.innerHTML = `<iframe id="previewIframe" class="preview-iframe" src="/api/render?file=${encodeURIComponent(file)}&t=${Date.now()}"></iframe>
       <div class="preview-hint"><span id="hintText">按住 <kbd>Option</kbd> + 点击元素</span></div>`;
+    // 加载该文件已保存的 marks
+    state.marks = loadMarks(file);
+    updateMarkCount();
+    // iframe load 完后注入 marks（reload 时重绘）
+    const iframeEl = $('#previewIframe');
+    if (iframeEl) {
+      iframeEl.addEventListener('load', () => {
+        if (iframeEl.contentWindow) {
+          iframeEl.contentWindow.postMessage({ type: 'ppt-ve-mode', mode: state.mode }, '*');
+          iframeEl.contentWindow.postMessage({ type: 'ppt-ve-redraw-marks', marks: state.marks }, '*');
+        }
+      });
+    }
     updateModeHint();
     sendWs({ type: 'watch', file });
     pushRecent(file);
@@ -471,6 +497,25 @@ window.addEventListener('message', (ev) => {
     console.log('[overlay]', p.msg);
     return;
   }
+  if (p.type === 'mark:created') {
+    state.marks.push(p.mark);
+    saveMarks(state.currentFile, state.marks);
+    updateMarkCount();
+    return;
+  }
+  if (p.type === 'mark:deleted') {
+    state.marks = state.marks.filter((m) => m.id !== p.id);
+    saveMarks(state.currentFile, state.marks);
+    updateMarkCount();
+    return;
+  }
+  if (p.type === 'mark:sync') {
+    // overlay 主动同步整批 marks（撤销/重做/Shift+Click 删除后）
+    state.marks = Array.isArray(p.marks) ? p.marks : [];
+    saveMarks(state.currentFile, state.marks);
+    updateMarkCount();
+    return;
+  }
   if (p.type !== 'select') return;
   sendWs({ type: 'selection', payload: p });
   handleSelection(p);
@@ -503,7 +548,7 @@ function renderQueue() {
     queueList.innerHTML = `
       <div class="queue-empty">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-        <span>${state.mode === 'rect' ? '拖拽鼠标框选多个元素' : state.mode === 'text' ? '用鼠标选中文本' : '按住 Option/Alt + 点击 元素'}</span>
+        <span>${state.mode === 'rect' ? '拖拽鼠标框选多个元素' : state.mode === 'text' ? '用鼠标选中文本' : state.mode === 'mark' ? '在画板上拖拽画框，或切到文字工具点击标注' : '按住 Option/Alt + 点击 元素'}</span>
       </div>`;
     return;
   }
@@ -515,11 +560,22 @@ function renderQueue() {
     const card = document.createElement('div');
     card.className = 'queue-card';
     card.dataset.idx = state.selections.indexOf(s);
-    const text = s.selectedText || s.text || (s.elementHtml || '').replace(/<[^>]+>/g, '').trim().slice(0, 60);
+    let text;
+    let anchor;
+    let modeTag = '';
+    if (s.mode === 'mark') {
+      modeTag = ' · mark';
+      anchor = `画板标记 ×${s.marks?.length || 0}`;
+      text = s.marks?.map((m) => m.type === 'text' ? `「${m.text}」` : `框(${Math.round(m.w)}×${Math.round(m.h)})`).join('  ') || '';
+    } else {
+      anchor = s.selector?.anchor || '—';
+      modeTag = s.mode === 'rect' ? ' · rect' : s.mode === 'text' ? ' · text' : '';
+      text = s.selectedText || s.text || (s.elementHtml || '').replace(/<[^>]+>/g, '').trim().slice(0, 60);
+    }
     card.innerHTML = `
       <div class="queue-card-index">${idx}</div>
-      <div class="queue-card-anchor">${s.selector?.anchor || '—'}${s.mode === 'rect' ? ' · rect' : s.mode === 'text' ? ' · text' : ''}</div>
-      <div class="queue-card-sel">${escapeHtml(s.selector?.css || '?')}</div>
+      <div class="queue-card-anchor">${anchor}${modeTag}</div>
+      <div class="queue-card-sel">${escapeHtml(s.selector?.css || (s.mode === 'mark' ? '(blank-area annotations)' : '?'))}</div>
       <div class="queue-card-text">${escapeHtml(text)}</div>
       <div class="queue-card-actions">
         <button class="send" data-act="send">发送</button>
@@ -569,6 +625,12 @@ function sendSelectionToTerminal(idx) {
 
 function buildContextPacket(s) {
   const file = state.currentFile || '(未加载文件)';
+
+  // —— mark 模式的卡片：所有标记打包成一个 blank-area 包 ——
+  if (s.mode === 'mark' && Array.isArray(s.marks)) {
+    return buildMarkPacket(file, s.marks);
+  }
+
   const lines = [];
 
   // 头部：明确告诉 Claude 这是文件 + 元素位置参考
@@ -630,6 +692,33 @@ function buildContextPacket(s) {
     lines.push('  </pseudo-elements>');
   }
   lines.push('</target>');
+  return lines.join('\n');
+}
+
+// 构造 mark 卡片的上下文包：告诉 Claude「在 PPT 的这些空白区域做什么」
+function buildMarkPacket(file, marks) {
+  const lines = [];
+  lines.push(`我在浏览器里给 HTML 文件画了几条标记（框/文字），想让你在这些位置上做修改或新增元素。`);
+  lines.push('');
+  lines.push(`📄 文件路径：${file}`);
+  lines.push('');
+  lines.push(`<annotations count="${marks.length}">`);
+  for (const m of marks) {
+    if (m.type === 'rect') {
+      lines.push(`  <blank-area type="rect" rect="${Math.round(m.x)},${Math.round(m.y)},${Math.round(m.w)},${Math.round(m.h)}" stroke="${m.stroke || '#ef4444'}" />`);
+    } else if (m.type === 'text') {
+      lines.push(`  <label x="${Math.round(m.x)}" y="${Math.round(m.y)}" color="${m.color || '#ef4444'}">${escapeHtml(m.text)}</label>`);
+    } else if (m.type === 'arrow') {
+      lines.push(`  <arrow from="${Math.round(m.x1)},${Math.round(m.y1)}" to="${Math.round(m.x2)},${Math.round(m.y2)}" stroke="${m.stroke || '#ef4444'}" />`);
+    } else if (m.type === 'pen' && Array.isArray(m.points)) {
+      const pts = m.points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
+      lines.push(`  <pen stroke="${m.stroke || '#ef4444'}" points="${pts}" />`);
+    }
+  }
+  lines.push(`</annotations>`);
+  lines.push('');
+  lines.push(`坐标说明：x,y 是相对浏览器视口左上角的像素位置；rect 是 "左上x,左上y,宽,高"。`);
+  lines.push(`请根据这些坐标定位空白区域，参考附近已有元素的位置和布局，在该位置做我接下来要的修改。`);
   return lines.join('\n');
 }
 
@@ -803,12 +892,20 @@ $('#clearRecentBtn').addEventListener('click', () => {
 function setMode(m) {
   state.mode = m;
   $$('#modeGroup .tool-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
-  modeStatus.textContent = { point: '点选模式', rect: '框选模式', text: '文本选区模式' }[m];
+  modeStatus.textContent = { point: '点选模式', rect: '框选模式', text: '文本选区模式', mark: '标记模式' }[m];
   updateModeHint();
+  // mark 工具条开关
+  const markToolbar = $('#markToolbar');
+  if (markToolbar) markToolbar.classList.toggle('open', m === 'mark');
   // 通知 iframe
   const iframe = $('#previewIframe');
   if (iframe && iframe.contentWindow) {
     iframe.contentWindow.postMessage({ type: 'ppt-ve-mode', mode: m }, '*');
+    // 进入 mark 模式时立即推送当前文件已有的 marks
+    if (m === 'mark') {
+      iframe.contentWindow.postMessage({ type: 'ppt-ve-redraw-marks', marks: state.marks || [] }, '*');
+      sendMarkToolConfig();
+    }
   }
   renderQueue(); // 提示文案跟随
 }
@@ -819,9 +916,181 @@ function updateModeHint() {
     point: '按住 <kbd>Option</kbd> + 点击元素',
     rect: '拖拽鼠标框选多个元素',
     text: '用鼠标选中文本',
+    mark: '在画板上拖拽画框/点文字工具标注，<kbd>Shift</kbd>+点击标记可删除',
   }[state.mode];
 }
 $$('#modeGroup .tool-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+// ============ Mark Board ============
+function marksKey(file) { return 've-marks:' + (file || ''); }
+function loadMarks(file) {
+  if (!file) return [];
+  try { return JSON.parse(localStorage.getItem(marksKey(file)) || '[]'); } catch { return []; }
+}
+function saveMarks(file, marks) {
+  if (!file) return;
+  try { localStorage.setItem(marksKey(file), JSON.stringify(marks)); } catch {}
+}
+function updateMarkCount() {
+  const el = $('#markCount');
+  if (el) el.textContent = (state.marks?.length || 0) + ' 条';
+}
+function sendMarkToolConfig() {
+  const iframe = $('#previewIframe');
+  if (!iframe?.contentWindow) return;
+  iframe.contentWindow.postMessage({
+    type: 'ppt-ve-mark-tool',
+    tool: state.markTool,
+    color: state.markColor,
+    strokeWidth: state.markStrokeWidth,
+  }, '*');
+}
+
+// 工具切换
+$$('#markToolbar .mark-tool-btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    state.markTool = b.dataset.tool;
+    $$('#markToolbar .mark-tool-btn').forEach((x) => x.classList.toggle('active', x === b));
+    sendMarkToolConfig();
+  });
+});
+// 颜色
+$$('#markColors .mark-color-btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    state.markColor = b.dataset.color;
+    $$('#markColors .mark-color-btn').forEach((x) => x.classList.toggle('active', x === b));
+    sendMarkToolConfig();
+  });
+});
+// 线宽
+$('#markStroke')?.addEventListener('change', (e) => {
+  state.markStrokeWidth = parseInt(e.target.value, 10) || 2;
+  sendMarkToolConfig();
+});
+// 清空
+$('#markClearBtn')?.addEventListener('click', () => {
+  if (!state.marks?.length) return;
+  if (!confirm('清空所有标记？')) return;
+  state.marks = [];
+  saveMarks(state.currentFile, state.marks);
+  updateMarkCount();
+  const iframe = $('#previewIframe');
+  iframe?.contentWindow?.postMessage({ type: 'ppt-ve-clear-marks' }, '*');
+});
+// 全选发送：所有 mark 打包成一张卡片入队
+$('#markSendAllBtn')?.addEventListener('click', () => {
+  if (!state.marks?.length) {
+    toast({ type: 'info', msg: '没有可发送的标记', duration: 1500 });
+    return;
+  }
+  const card = {
+    mode: 'mark',
+    marks: state.marks.slice(),
+    ts: Date.now(),
+    pinned: false,
+  };
+  state.selections.unshift(card);
+  if (state.selections.length > 20) state.selections.length = 20;
+  renderQueue();
+  toast({ type: 'success', title: `${state.marks.length} 条标记已入队`, msg: '在选区队列点「发送」', duration: 2500 });
+});
+// 退出
+$('#markExitBtn')?.addEventListener('click', () => setMode('point'));
+
+// 移除 HTML 中已写入的批注层
+$('#markRemoveWrittenBtn')?.addEventListener('click', () => {
+  const file = state.currentFile;
+  if (!file) { toast({ type: 'error', msg: '未加载文件' }); return; }
+  if (!confirm('让 Claude 扫描并删除 HTML 中所有 .ve-marks 批注层？\n（先备份）')) return;
+  const fileArg = file.replace(/'/g, "\\'");
+  const prompt = `删除 HTML 中所有已写入的批注层，文件：${file}
+
+铁律：
+1. 先备份：\`curl -sX POST http://localhost:${location.port}/api/backup -H 'Content-Type: application/json' -d '{"file":"${fileArg}"}'\`
+2. 删除所有匹配 \`svg.ve-marks[data-role="annotation"]\` 的元素（含其前的 \`<!-- ve-marks: ... -->\` 注释）
+3. 如果 HTML 里有伴随的 \`<style>.ve-marks, .ve-marks * {...}</style>\`，也一并删除
+4. 不要动其他任何内容；删除完成后汇报删了几条`;
+  const data = prompt + '\n';
+  window.sendWs?.({ type: 'pty:in', data });
+  window.term?.focus?.();
+  toast({ type: 'success', title: '已发送到终端', msg: 'Claude 备份后会删除批注层', duration: 2500 });
+});
+
+// 撤销 / 重做（透传给 overlay.js，那里有 undoStack）
+$('#markUndoBtn')?.addEventListener('click', () => {
+  $('#previewIframe')?.contentWindow?.postMessage({ type: 'ppt-ve-mark-undo' }, '*');
+});
+$('#markRedoBtn')?.addEventListener('click', () => {
+  $('#previewIframe')?.contentWindow?.postMessage({ type: 'ppt-ve-mark-redo' }, '*');
+});
+
+// 写入 HTML 源文件：序列化 marks 为 SVG，构造 prompt 让 Claude 备份 + 插入
+$('#markWriteHtmlBtn')?.addEventListener('click', () => {
+  const file = state.currentFile;
+  if (!file) { toast({ type: 'error', msg: '未加载文件' }); return; }
+  if (!state.marks?.length) { toast({ type: 'info', msg: '没有标记可写入' }); return; }
+  if (!confirm(`将 ${state.marks.length} 条标记作为 SVG 永久写入 HTML 源文件？\n（会让 Claude 先备份再插入）`)) return;
+
+  const svgInner = serializeMarksToSvg(state.marks);
+  const prompt = buildWriteHtmlPrompt(file, state.marks, svgInner);
+  // 灌进终端
+  const data = prompt + '\n';
+  window.sendWs?.({ type: 'pty:in', data });
+  window.term?.focus?.();
+  toast({ type: 'success', title: '已发送到终端', msg: 'Claude 备份后会插入 SVG', duration: 3000 });
+});
+
+// 把 marks 数据序列化成可以直接嵌入 HTML 的 SVG 字符串（含 4 种类型）
+function serializeMarksToSvg(marks) {
+  const ns = '';
+  const parts = [];
+  for (const m of marks) {
+    const stroke = m.stroke || m.color || '#ef4444';
+    const sw = m.strokeWidth || 2;
+    if (m.type === 'rect') {
+      parts.push(`<rect${ns} x="${Math.round(m.x)}" y="${Math.round(m.y)}" width="${Math.round(m.w)}" height="${Math.round(m.h)}" fill="none" stroke="${stroke}" stroke-width="${sw}" rx="2" />`);
+    } else if (m.type === 'text') {
+      const txt = escapeHtml(m.text || '');
+      parts.push(`<text${ns} x="${Math.round(m.x)}" y="${Math.round(m.y)}" fill="${stroke}" font-size="${m.fontSize || 14}" font-weight="600" stroke="#fff" stroke-width="3" paint-order="stroke" font-family="-apple-system,system-ui,sans-serif">${txt}</text>`);
+    } else if (m.type === 'arrow') {
+      const dx = m.x2 - m.x1, dy = m.y2 - m.y1;
+      const len = Math.hypot(dx, dy) || 1;
+      const headLen = 10 + (sw - 1) * 2;
+      const ux = dx / len, uy = dy / len, px = -uy, py = ux;
+      const baseX = m.x2 - ux * headLen, baseY = m.y2 - uy * headLen;
+      const halfW = headLen * 0.45;
+      parts.push(`<g${ns}><line x1="${Math.round(m.x1)}" y1="${Math.round(m.y1)}" x2="${Math.round(m.x2)}" y2="${Math.round(m.y2)}" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" /><polygon points="${Math.round(m.x2)},${Math.round(m.y2)} ${Math.round(baseX + px * halfW)},${Math.round(baseY + py * halfW)} ${Math.round(baseX - px * halfW)},${Math.round(baseY - py * halfW)}" fill="${stroke}" /></g>`);
+    } else if (m.type === 'pen' && Array.isArray(m.points) && m.points.length >= 2) {
+      const pts = m.points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
+      parts.push(`<polyline${ns} points="${pts}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" />`);
+    }
+  }
+  return parts.join('\n    ');
+}
+
+// 构造写入 HTML 的 prompt（复用 audit.js 风格：先备份 + 明确指令）
+function buildWriteHtmlPrompt(file, marks, svgInner) {
+  const fileArg = file.replace(/'/g, "\\'");
+  const slideId = `marks_${Date.now().toString(36)}`;
+  // 关键：SVG 用 position:fixed + 100vw/100vh，挂在 body 直接子节点
+  // 这样 SVG 内部坐标 = 浏览器视口像素 = 画 mark 时存的 clientX/Y，无需任何换算
+  const svgBlock = `<svg class="ve-marks" data-role="annotation" data-ai-id="marks.${slideId}" aria-hidden="true" style="position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:9999;">\n    ${svgInner}\n  </svg>`;
+  return `把浏览器里画的标记永久写入 HTML 源文件，文件：${file}
+
+铁律：
+1. 先备份：\`curl -sX POST http://localhost:${location.port}/api/backup -H 'Content-Type: application/json' -d '{"file":"${fileArg}"}'\`（自动滚动保留 N 份）
+2. 在 \`<body>\` **直接子节点末尾**插入 SVG 批注层（必须挂在 body 下，不要放进 .slide / 容器，否则被 transform/padding 影响坐标）
+3. SVG 容器（直接复制，不要改 style、不要加 viewBox）：\`${svgBlock}\`
+   - 坐标系：标记坐标就是浏览器视口像素，SVG 用 fixed+100vw/100vh 占满视口，内部坐标 1:1 对应像素
+   - **禁止加 viewBox**（会触发缩放导致坐标错位）
+4. SVG 内所有子元素（rect/line/polyline/text/g/polygon）**必须**额外加 \`style="pointer-events:none"\` 或在 SVG 父节点用 CSS 强制：\`<style>.ve-marks, .ve-marks * { pointer-events: none !important; }</style>\` —— 确保批注层永远不会拦截点击
+5. SVG 元素前加注释 \`<!-- ve-marks: 视觉批注层，由 PPT Visual Editor 写入，可用 .ve-marks 选择器整块删除 -->\`
+6. 不要改动 PPT 其他内容；插入完成后简述：插在了哪个位置、标记数量
+7. 不要把标记当作 PPT 正文内容理解——这层是批注（annotation），仅用于在图上加框/箭头/文字标识
+
+待写入的标记（共 ${marks.length} 条，已序列化为 SVG 片段）：
+${svgInner}`;
+}
 
 $('#clearSelBtn').addEventListener('click', () => {
   const iframe = $('#previewIframe');
@@ -976,6 +1245,7 @@ document.addEventListener('keydown', (ev) => {
     if (ev.key === 'p' || ev.key === 'P') { setMode('point'); return; }
     if (ev.key === 'r' || ev.key === 'R') { setMode('rect'); return; }
     if (ev.key === 't' || ev.key === 'T') { setMode('text'); return; }
+    if (ev.key === 'm' || ev.key === 'M') { setMode('mark'); return; }
   }
 
   if (!mod) return;

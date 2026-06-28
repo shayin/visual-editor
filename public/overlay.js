@@ -530,10 +530,12 @@
         e.classList.remove('ppt-ve-selected');
         e.classList.remove('ppt-ve-rect-hit');
       });
+      // mark 模式开关画板
+      if (mode === 'mark') enableMarkBoard();
+      else disableMarkBoard();
     } else if (d.type === 'ppt-ve-clear') {
       document.querySelectorAll('.ppt-ve-selected').forEach((e) => e.classList.remove('ppt-ve-selected'));
     } else if (d.type === 'ppt-ve-highlight') {
-      // 给定 selector 高亮一个元素
       try {
         const el = document.querySelector(d.selector);
         if (el) {
@@ -542,8 +544,442 @@
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
       } catch {}
+    } else if (d.type === 'ppt-ve-mark-tool') {
+      markTool = d.tool || 'rect';
+      markColor = d.color || markColor;
+      markStrokeWidth = d.strokeWidth || markStrokeWidth;
+      applyMarkCursor();
+    } else if (d.type === 'ppt-ve-redraw-marks') {
+      marks = Array.isArray(d.marks) ? d.marks : [];
+      renderMarks();
+    } else if (d.type === 'ppt-ve-clear-marks') {
+      marks = [];
+      renderMarks();
+    } else if (d.type === 'ppt-ve-mark-undo') {
+      undo();
+    } else if (d.type === 'ppt-ve-mark-redo') {
+      redo();
     }
   });
 
   console.log('[ppt-ve] overlay loaded. mode=point');
+
+  // ============ Mark Board（画板层） ============
+  // 进入 mark 模式时注入顶层 SVG 画板，支持矩形/文字（Phase A）
+  // 箭头/画笔在 Phase B 加
+  let markBoard = null;
+  let markTool = 'rect';
+  let markColor = '#ef4444';
+  let markStrokeWidth = 2;
+  let marks = []; // 数据模型
+  let drawing = false;
+  let drawStart = null;
+  let draftEl = null;
+  let draftPoints = null;
+
+  const MARKBOARD_STYLE = `
+    #ve-markboard {
+      position: fixed !important;
+      top: 0 !important; left: 0 !important;
+      width: 100vw !important; height: 100vh !important;
+      z-index: 99990 !important;
+      pointer-events: none;
+      cursor: default;
+      color: initial;
+      font: initial;
+      background: transparent;
+    }
+    #ve-markboard.active { pointer-events: auto; }
+    #ve-markboard text { font-family: -apple-system, system-ui, sans-serif; user-select: none; }
+    #ve-markboard .ve-mark { cursor: pointer; }
+    #ve-markboard .ve-mark:hover { filter: drop-shadow(0 0 4px rgba(0,0,0,0.5)); }
+  `;
+
+  function ensureMarkStyle() {
+    if (document.getElementById('ve-mark-style')) return;
+    const s = document.createElement('style');
+    s.id = 've-mark-style';
+    s.textContent = MARKBOARD_STYLE;
+    document.head.appendChild(s);
+  }
+
+  function ensureMarkBoard() {
+    ensureMarkStyle();
+    if (markBoard) return markBoard;
+    markBoard = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    markBoard.setAttribute('id', 've-markboard');
+    markBoard.setAttribute('width', '100%');
+    markBoard.setAttribute('height', '100%');
+    document.body.appendChild(markBoard);
+    // 绑定画板事件
+    markBoard.addEventListener('mousedown', onMarkMouseDown);
+    markBoard.addEventListener('mousemove', onMarkMouseMove);
+    window.addEventListener('mouseup', onMarkMouseUp);
+    return markBoard;
+  }
+
+  function enableMarkBoard() {
+    ensureMarkBoard();
+    markBoard.classList.add('active');
+    applyMarkCursor();
+    renderMarks();
+  }
+
+  function disableMarkBoard() {
+    if (!markBoard) return;
+    markBoard.classList.remove('active');
+  }
+
+  function applyMarkCursor() {
+    if (!markBoard) return;
+    const cursors = { rect: 'crosshair', text: 'text', arrow: 'crosshair', pen: 'crosshair' };
+    markBoard.style.cursor = cursors[markTool] || 'crosshair';
+  }
+
+  function svgPt(ev) {
+    // 转换鼠标坐标到 SVG 路径需要的 viewport 坐标
+    return { x: ev.clientX, y: ev.clientY };
+  }
+
+  function onMarkMouseDown(ev) {
+    if (!markBoard || !markBoard.classList.contains('active')) return;
+    if (ev.button !== 0) return;
+    const p = svgPt(ev);
+    const ns = 'http://www.w3.org/2000/svg';
+    if (markTool === 'text') {
+      const text = window.prompt('输入标注文字：');
+      if (text && text.trim()) {
+        const m = {
+          id: 'mk_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+          type: 'text',
+          x: p.x, y: p.y,
+          text: text.trim(),
+          fontSize: 14,
+          color: markColor,
+          ts: Date.now(),
+        };
+        pushUndo();
+        marks.push(m);
+        renderMarks();
+        notifyMarkCreated(m);
+      }
+      return;
+    }
+    drawing = true;
+    drawStart = p;
+    draftPoints = null;
+    if (markTool === 'rect') {
+      draftEl = document.createElementNS(ns, 'rect');
+      draftEl.setAttribute('x', p.x);
+      draftEl.setAttribute('y', p.y);
+      draftEl.setAttribute('width', 0);
+      draftEl.setAttribute('height', 0);
+      draftEl.setAttribute('fill', 'none');
+      draftEl.setAttribute('stroke', markColor);
+      draftEl.setAttribute('stroke-width', markStrokeWidth);
+      draftEl.setAttribute('stroke-dasharray', '4 2');
+      markBoard.appendChild(draftEl);
+    } else if (markTool === 'arrow') {
+      draftEl = document.createElementNS(ns, 'line');
+      draftEl.setAttribute('x1', p.x); draftEl.setAttribute('y1', p.y);
+      draftEl.setAttribute('x2', p.x); draftEl.setAttribute('y2', p.y);
+      draftEl.setAttribute('stroke', markColor);
+      draftEl.setAttribute('stroke-width', markStrokeWidth);
+      draftEl.setAttribute('stroke-linecap', 'round');
+      markBoard.appendChild(draftEl);
+    } else if (markTool === 'pen') {
+      draftPoints = [p];
+      draftEl = document.createElementNS(ns, 'polyline');
+      draftEl.setAttribute('points', `${p.x},${p.y}`);
+      draftEl.setAttribute('fill', 'none');
+      draftEl.setAttribute('stroke', markColor);
+      draftEl.setAttribute('stroke-width', markStrokeWidth);
+      draftEl.setAttribute('stroke-linecap', 'round');
+      draftEl.setAttribute('stroke-linejoin', 'round');
+      markBoard.appendChild(draftEl);
+    }
+  }
+
+  function onMarkMouseMove(ev) {
+    if (!drawing) return;
+    const p = svgPt(ev);
+    if (markTool === 'rect' && draftEl && drawStart) {
+      const x = Math.min(drawStart.x, p.x);
+      const y = Math.min(drawStart.y, p.y);
+      const w = Math.abs(p.x - drawStart.x);
+      const h = Math.abs(p.y - drawStart.y);
+      draftEl.setAttribute('x', x);
+      draftEl.setAttribute('y', y);
+      draftEl.setAttribute('width', w);
+      draftEl.setAttribute('height', h);
+    } else if (markTool === 'arrow' && draftEl && drawStart) {
+      draftEl.setAttribute('x2', p.x);
+      draftEl.setAttribute('y2', p.y);
+    } else if (markTool === 'pen' && draftEl && draftPoints) {
+      draftPoints.push(p);
+      // 简化：采样间隔，避免点太密
+      const last = draftPoints[draftPoints.length - 2];
+      if (Math.hypot(p.x - last.x, p.y - last.y) < 2) {
+        draftPoints.pop();
+        return;
+      }
+      draftEl.setAttribute('points', draftPoints.map((q) => `${q.x},${q.y}`).join(' '));
+    }
+  }
+
+  function onMarkMouseUp(ev) {
+    if (!drawing) return;
+    drawing = false;
+    const p = svgPt(ev);
+    const baseId = 'mk_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    if (markTool === 'rect' && draftEl && drawStart) {
+      const x = Math.min(drawStart.x, p.x);
+      const y = Math.min(drawStart.y, p.y);
+      const w = Math.abs(p.x - drawStart.x);
+      const h = Math.abs(p.y - drawStart.y);
+      if (w >= 6 && h >= 6) {
+        const m = { id: baseId, type: 'rect', x, y, w, h, stroke: markColor, strokeWidth: markStrokeWidth, ts: Date.now() };
+        pushUndo();
+        marks.push(m);
+        notifyMarkCreated(m);
+      }
+    } else if (markTool === 'arrow' && draftEl && drawStart) {
+      const len = Math.hypot(p.x - drawStart.x, p.y - drawStart.y);
+      if (len >= 8) {
+        const m = { id: baseId, type: 'arrow', x1: drawStart.x, y1: drawStart.y, x2: p.x, y2: p.y, stroke: markColor, strokeWidth: markStrokeWidth, ts: Date.now() };
+        pushUndo();
+        marks.push(m);
+        notifyMarkCreated(m);
+      }
+    } else if (markTool === 'pen' && draftEl && draftPoints) {
+      if (draftPoints.length >= 2) {
+        const m = { id: baseId, type: 'pen', points: draftPoints.map((q) => [q.x, q.y]), stroke: markColor, strokeWidth: markStrokeWidth, ts: Date.now() };
+        pushUndo();
+        marks.push(m);
+        notifyMarkCreated(m);
+      }
+    }
+    if (draftEl && draftEl.parentNode) draftEl.parentNode.removeChild(draftEl);
+    draftEl = null;
+    drawStart = null;
+    draftPoints = null;
+    renderMarks();
+  }
+
+  function renderMarks() {
+    if (!markBoard) return;
+    // 清除现有 mark 节点（保留 draftEl，不过 draftEl 已经被 up 时移除）
+    const old = markBoard.querySelectorAll('.ve-mark');
+    old.forEach((n) => n.remove());
+    // 重绘
+    for (const m of marks) {
+      const node = createMarkNode(m);
+      if (node) {
+        node.classList.add('ve-mark');
+        node.dataset.id = m.id;
+        // Shift+Click 直接删除
+        node.addEventListener('click', (e) => {
+          if (e.shiftKey) {
+            e.stopPropagation();
+            pushUndo();
+            marks = marks.filter((x) => x.id !== m.id);
+            selectedMarkId = null;
+            renderMarks();
+            notifyMarkSync();
+          }
+        });
+        // 拖拽移动（非 Shift 时按下即进入拖拽）
+        node.addEventListener('mousedown', (e) => {
+          if (e.shiftKey || e.button !== 0) return;
+          if (!markBoard.classList.contains('active')) return;
+          e.stopPropagation();
+          startDragMove(e, m);
+        });
+        markBoard.appendChild(node);
+      }
+    }
+  }
+
+  // —— 拖拽移动标记 ——
+  let dragMove = null; // { mark, startMouse, origMark }
+  function startDragMove(ev, m) {
+    selectedMarkId = m.id;
+    pushUndo();
+    dragMove = {
+      mark: m,
+      startMouse: { x: ev.clientX, y: ev.clientY },
+      origMark: JSON.parse(JSON.stringify(m)),
+    };
+    const onMove = (e) => {
+      if (!dragMove) return;
+      const dx = e.clientX - dragMove.startMouse.x;
+      const dy = e.clientY - dragMove.startMouse.y;
+      const o = dragMove.origMark;
+      const t = dragMove.mark;
+      if (t.type === 'rect') {
+        t.x = o.x + dx; t.y = o.y + dy;
+      } else if (t.type === 'text') {
+        t.x = o.x + dx; t.y = o.y + dy;
+      } else if (t.type === 'arrow') {
+        t.x1 = o.x1 + dx; t.y1 = o.y1 + dy;
+        t.x2 = o.x2 + dx; t.y2 = o.y2 + dy;
+      } else if (t.type === 'pen' && Array.isArray(o.points)) {
+        t.points = o.points.map(([x, y]) => [x + dx, y + dy]);
+      }
+      renderMarks();
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (dragMove) notifyMarkSync();
+      dragMove = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function createMarkNode(m) {
+    const ns = 'http://www.w3.org/2000/svg';
+    if (m.type === 'rect') {
+      const r = document.createElementNS(ns, 'rect');
+      r.setAttribute('x', m.x);
+      r.setAttribute('y', m.y);
+      r.setAttribute('width', m.w);
+      r.setAttribute('height', m.h);
+      r.setAttribute('fill', 'none');
+      r.setAttribute('stroke', m.stroke || '#ef4444');
+      r.setAttribute('stroke-width', m.strokeWidth || 2);
+      r.setAttribute('rx', 2);
+      return r;
+    }
+    if (m.type === 'text') {
+      const t = document.createElementNS(ns, 'text');
+      t.setAttribute('x', m.x);
+      t.setAttribute('y', m.y);
+      t.setAttribute('fill', m.color || '#ef4444');
+      t.setAttribute('font-size', m.fontSize || 14);
+      t.setAttribute('font-weight', 600);
+      // 背景：用 paint-order 描边模拟背景，便于在彩色图片上可读
+      t.setAttribute('stroke', '#fff');
+      t.setAttribute('stroke-width', 3);
+      t.setAttribute('paint-order', 'stroke');
+      t.textContent = m.text;
+      return t;
+    }
+    if (m.type === 'arrow') {
+      const g = document.createElementNS(ns, 'g');
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', m.x1); line.setAttribute('y1', m.y1);
+      line.setAttribute('x2', m.x2); line.setAttribute('y2', m.y2);
+      line.setAttribute('stroke', m.stroke || '#ef4444');
+      line.setAttribute('stroke-width', m.strokeWidth || 2);
+      line.setAttribute('stroke-linecap', 'round');
+      g.appendChild(line);
+      // 箭头头部三角形
+      const dx = m.x2 - m.x1, dy = m.y2 - m.y1;
+      const len = Math.hypot(dx, dy);
+      if (len > 0.1) {
+        const headLen = 10 + ((m.strokeWidth || 2) - 1) * 2;
+        const ux = dx / len, uy = dy / len;
+        const px = -uy, py = ux;
+        const baseX = m.x2 - ux * headLen;
+        const baseY = m.y2 - uy * headLen;
+        const halfW = headLen * 0.45;
+        const tri = document.createElementNS(ns, 'polygon');
+        tri.setAttribute('points', `${m.x2},${m.y2} ${baseX + px * halfW},${baseY + py * halfW} ${baseX - px * halfW},${baseY - py * halfW}`);
+        tri.setAttribute('fill', m.stroke || '#ef4444');
+        g.appendChild(tri);
+      }
+      return g;
+    }
+    if (m.type === 'pen' && Array.isArray(m.points) && m.points.length >= 2) {
+      const poly = document.createElementNS(ns, 'polyline');
+      poly.setAttribute('points', m.points.map(([x, y]) => `${x},${y}`).join(' '));
+      poly.setAttribute('fill', 'none');
+      poly.setAttribute('stroke', m.stroke || '#ef4444');
+      poly.setAttribute('stroke-width', m.strokeWidth || 2);
+      poly.setAttribute('stroke-linecap', 'round');
+      poly.setAttribute('stroke-linejoin', 'round');
+      return poly;
+    }
+    return null;
+  }
+
+  function notifyMarkCreated(m) {
+    window.parent.postMessage({ type: 'mark:created', mark: m }, '*');
+  }
+  function notifyMarkDeleted(id) {
+    window.parent.postMessage({ type: 'mark:deleted', id }, '*');
+  }
+  function notifyMarkSync() {
+    window.parent.postMessage({ type: 'mark:sync', marks }, '*');
+  }
+
+  // ============ Undo / Redo ============
+  // 每次标记变化前 push 一份 snapshot，限制 50 步
+  const undoStack = [];
+  const redoStack = [];
+  const MAX_UNDO = 50;
+  let selectedMarkId = null;
+
+  function snapshot() {
+    return JSON.parse(JSON.stringify(marks));
+  }
+  function pushUndo() {
+    undoStack.push(snapshot());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack.length = 0; // 新动作清空 redo
+  }
+  function undo() {
+    if (!undoStack.length) return;
+    redoStack.push(snapshot());
+    marks = undoStack.pop();
+    renderMarks();
+    notifyMarkSync();
+  }
+  function redo() {
+    if (!redoStack.length) return;
+    undoStack.push(snapshot());
+    marks = redoStack.pop();
+    renderMarks();
+    notifyMarkSync();
+  }
+
+  // 在 mark 创建/删除前调 pushUndo
+  // 改写 notifyMarkCreated / 调用方在 push mark 前手动 pushUndo
+  // 简化：监听 mark 操作
+  const origNotifyCreated = notifyMarkCreated;
+  // 不重写：在 onMarkMouseDown/Up 处显式调
+  function deleteMark(id) {
+    pushUndo();
+    marks = marks.filter((m) => m.id !== id);
+    renderMarks();
+    notifyMarkSync();
+  }
+
+  // 键盘快捷键（仅 mark 模式激活时）
+  document.addEventListener('keydown', (ev) => {
+    if (!markBoard || !markBoard.classList.contains('active')) return;
+    // Ctrl/Cmd + Z 撤销
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
+      ev.preventDefault();
+      if (ev.shiftKey) redo(); else undo();
+      return;
+    }
+    // Ctrl/Cmd + Y 重做
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'y') {
+      ev.preventDefault();
+      redo();
+      return;
+    }
+    // Delete / Backspace 删除选中
+    if ((ev.key === 'Delete' || ev.key === 'Backspace') && selectedMarkId) {
+      ev.preventDefault();
+      deleteMark(selectedMarkId);
+      selectedMarkId = null;
+    }
+  }, true);
+
+  // 暴露给外部调试
+  window.__veMarkDebug__ = { getMarks: () => marks };
 })();
