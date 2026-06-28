@@ -464,6 +464,36 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .mark-action.danger { background: transparent; color: #ef4444; border-color: #ef4444; }
 .mark-action.danger:hover { background: #ef4444; color: #fff; }
 .mark-action svg { vertical-align: -2px; margin-right: 3px; }
+.mark-color-custom {
+  position: relative;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  display: inline-block;
+}
+.mark-color-custom input[type="color"] {
+  position: absolute; inset: -4px;
+  width: calc(100% + 8px); height: calc(100% + 8px);
+  border: none; padding: 0; cursor: pointer;
+  opacity: 0;
+}
+.mark-color-custom-preview {
+  position: absolute; inset: 0;
+  pointer-events: none;
+}
+.mark-color-input {
+  width: 80px;
+  padding: 3px 6px;
+  font: 10px var(--font-mono);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  outline: none;
+}
+.mark-color-input:focus { border-color: var(--accent); }
 
 /* ============================================================
    Bottom Selection Queue Drawer

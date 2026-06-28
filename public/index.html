@@ -225,10 +225,15 @@
   <div class="mark-divider"></div>
   <div class="mark-colors" id="markColors">
     <button class="mark-color-btn active" data-color="#ef4444" style="background:#ef4444" title="红"></button>
-    <button class="mark-color-btn" data-color="#f59e0b" style="background:#f59e0b" title="黄"></button>
+    <button class="mark-color-btn" data-color="#ed7d31" style="background:#ed7d31" title="橙"></button>
     <button class="mark-color-btn" data-color="#10b981" style="background:#10b981" title="绿"></button>
     <button class="mark-color-btn" data-color="#3b82f6" style="background:#3b82f6" title="蓝"></button>
     <button class="mark-color-btn" data-color="#000000" style="background:#000000" title="黑"></button>
+    <label class="mark-color-custom" title="自定义颜色">
+      <input type="color" id="markColorPicker" value="#ef4444" />
+      <span class="mark-color-custom-preview" id="markColorPreview" style="background:#ef4444"></span>
+    </label>
+    <input type="text" id="markColorInput" class="mark-color-input" value="#ef4444" spellcheck="false" title="输入 RGB(如 237,125,49) 或 #hex" placeholder="RGB/hex" />
   </div>
   <div class="mark-divider"></div>
   <select class="mark-stroke" id="markStroke" title="线宽">

@@ -959,8 +959,64 @@ $$('#markColors .mark-color-btn').forEach((b) => {
   b.addEventListener('click', () => {
     state.markColor = b.dataset.color;
     $$('#markColors .mark-color-btn').forEach((x) => x.classList.toggle('active', x === b));
+    syncCustomColorUI(b.dataset.color);
     sendMarkToolConfig();
   });
+});
+
+// 自定义颜色：统一设置入口（hex 格式 #rrggbb）
+function setCustomColor(hex) {
+  if (!hex) return;
+  state.markColor = hex;
+  // 取消所有预设按钮的 active
+  $$('#markColors .mark-color-btn').forEach((x) => x.classList.remove('active'));
+  // 如果恰好等于某个预设，高亮它
+  const match = $$(`#markColors .mark-color-btn[data-color="${hex.toLowerCase()}"]`);
+  if (match.length) match.forEach((x) => x.classList.add('active'));
+  syncCustomColorUI(hex);
+  sendMarkToolConfig();
+}
+function syncCustomColorUI(hex) {
+  const picker = $('#markColorPicker');
+  const preview = $('#markColorPreview');
+  const input = $('#markColorInput');
+  if (picker) picker.value = hex;
+  if (preview) preview.style.background = hex;
+  if (input && document.activeElement !== input) input.value = hex;
+}
+// 解析文本输入：支持 #hex / hex / r,g,b / rgb(r,g,b) / rgb(r g b)
+function parseColorInput(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  // hex: #ed7d31 / ed7d31 / #ed7 / ed7
+  let m = s.match(/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+  if (m) {
+    const h = m[1];
+    if (h.length === 3) {
+      return '#' + h.split('').map((c) => c + c).join('').toLowerCase();
+    }
+    return '#' + h.toLowerCase();
+  }
+  // rgb: 237,125,49 / 237, 125, 49 / rgb(237,125,49) / rgb(237 125 49)
+  m = s.match(/(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})/);
+  if (m) {
+    const r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
+    if (r <= 255 && g <= 255 && b <= 255) {
+      return '#' + [r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('').toLowerCase();
+    }
+  }
+  return null;
+}
+// color picker
+$('#markColorPicker')?.addEventListener('input', (e) => setCustomColor(e.target.value));
+// 文本输入：失焦或回车时解析
+$('#markColorInput')?.addEventListener('change', (e) => {
+  const hex = parseColorInput(e.target.value);
+  if (hex) setCustomColor(hex);
+  else { toast({ type: 'error', msg: '颜色格式无效，支持 #hex 或 R,G,B', duration: 2000 }); syncCustomColorUI(state.markColor); }
+});
+$('#markColorInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
 });
 // 线宽
 $('#markStroke')?.addEventListener('change', (e) => {
