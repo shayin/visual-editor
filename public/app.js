@@ -268,17 +268,21 @@ window.addEventListener('resize', () => {
   _resizeTimer = setTimeout(fitPreviewScale, 80);
 });
 
-// 让 iframe 内部 PPT 内容按比例缩放到视口内（内容超出时整体缩小，保证完全可见）
+// 让 iframe 整体按比例缩放到视口内（内容超出时整体缩小，保证完全可见）
+// 注意：transform 必须加在 iframe 元素本身，而不是 iframe 内部 html
+// —— 否则内部子元素 getBoundingClientRect 返回缩放后坐标，发给 Claude 的选区位置会错位
 function fitPreviewScale() {
   const iframe = $('#previewIframe');
   if (!iframe) return;
+  // 重置 iframe 自身 transform
+  iframe.style.transform = '';
+  iframe.style.transformOrigin = '';
+  // 同时清理可能残留的内部 html transform（兼容旧版）
   let doc;
   try { doc = iframe.contentDocument; } catch (e) { return; }
   if (!doc || !doc.documentElement) return;
   const html = doc.documentElement;
-  // 重置以便取真实自然尺寸
   html.style.transform = '';
-  html.style.transformOrigin = '';
   html.style.overflow = '';
   void html.offsetHeight; // 强制 reflow
   const innerW = Math.max(html.scrollWidth, doc.body?.scrollWidth || 0);
@@ -289,9 +293,8 @@ function fitPreviewScale() {
   // 按最小比例缩放，保证完全可见，不放大
   const scale = Math.min(viewW / innerW, viewH / innerH, 1);
   if (scale < 0.99) {
-    html.style.transformOrigin = 'top left';
-    html.style.transform = `scale(${scale})`;
-    html.style.overflow = 'hidden';
+    iframe.style.transformOrigin = 'top left';
+    iframe.style.transform = `scale(${scale})`;
   }
 }
 
