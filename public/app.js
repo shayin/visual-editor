@@ -20,6 +20,10 @@ const state = {
   inspectorOpen: false,
   settings: loadSettings(),
   recent: loadRecent(),
+  treeDirs: loadTreeDirs(),         // string[]，加载的根目录路径列表
+  treeExpanded: loadTreeExpanded(), // { '/abs/path': true }
+  treeHidden: loadTreeHidden(),     // { '/abs/path': true }，被屏蔽的子目录
+  treeCache: {},                    // { '/abs/path': TreeNode[] }，避免重复请求
   wsReady: false,
 };
 
@@ -43,6 +47,35 @@ function loadRecent() {
   try { return JSON.parse(localStorage.getItem('ve-recent') || '[]'); } catch { return []; }
 }
 function saveRecent() { localStorage.setItem('ve-recent', JSON.stringify(state.recent)); }
+
+function loadTreeDirs() {
+  try { return JSON.parse(localStorage.getItem('ve-tree-dirs') || '[]'); } catch { return []; }
+}
+function saveTreeDirs() {
+  localStorage.setItem('ve-tree-dirs', JSON.stringify(state.treeDirs));
+  // 清理孤立的 expanded / hidden 项
+  const valid = new Set(state.treeDirs);
+  for (const k of Object.keys(state.treeExpanded)) {
+    if (!valid.has(k) && !state.treeDirs.some((d) => k.startsWith(d + '/'))) {
+      delete state.treeExpanded[k];
+    }
+  }
+  for (const k of Object.keys(state.treeHidden)) {
+    if (!state.treeDirs.some((d) => k === d || k.startsWith(d + '/'))) {
+      delete state.treeHidden[k];
+    }
+  }
+  saveTreeExpanded();
+  saveTreeHidden();
+}
+function loadTreeExpanded() {
+  try { return JSON.parse(localStorage.getItem('ve-tree-expanded') || '{}'); } catch { return {}; }
+}
+function saveTreeExpanded() { localStorage.setItem('ve-tree-expanded', JSON.stringify(state.treeExpanded)); }
+function loadTreeHidden() {
+  try { return JSON.parse(localStorage.getItem('ve-tree-hidden') || '{}'); } catch { return {}; }
+}
+function saveTreeHidden() { localStorage.setItem('ve-tree-hidden', JSON.stringify(state.treeHidden)); }
 
 function pushRecent(file) {
   const exists = state.recent.findIndex((r) => r.path === file);
@@ -268,15 +301,25 @@ window.addEventListener('resize', () => {
   _resizeTimer = setTimeout(fitPreviewScale, 80);
 });
 
-// 让 iframe 整体按比例缩放到视口内（内容超出时整体缩小，保证完全可见）
+// 让 iframe 按 PPT 实际尺寸渲染，再整体缩放到视口内（不放大，完全可见）。
+// 实现要点：
+//   1. iframe 自身 width/height 设成 PPT 实际尺寸（innerW × innerH）
+//      —— 这样 transform: scale 缩的是"PPT 实际大小的 iframe"，缩完视觉尺寸 = innerW × scale，
+//         不会出现"iframe 占满 100% 但视觉缩小后留白"的问题。
+//   2. scale 取 min(viewW/innerW, viewH/innerH, 1) —— 保证 PPT 完整可见不被截断。
+//   3. preview-wrap 用 flex 居中 iframe，transformOrigin 用 center —— 让缩放后的 PPT 居中显示，
+//      周围留白对称（而不是右侧多一列）。
 // 注意：transform 必须加在 iframe 元素本身，而不是 iframe 内部 html
 // —— 否则内部子元素 getBoundingClientRect 返回缩放后坐标，发给 Claude 的选区位置会错位
 function fitPreviewScale() {
   const iframe = $('#previewIframe');
   if (!iframe) return;
-  // 重置 iframe 自身 transform
+  const wrap = iframe.parentElement;
+  // 重置 iframe 自身 transform 与尺寸
   iframe.style.transform = '';
   iframe.style.transformOrigin = '';
+  iframe.style.width = '';
+  iframe.style.height = '';
   // 同时清理可能残留的内部 html transform（兼容旧版）
   let doc;
   try { doc = iframe.contentDocument; } catch (e) { return; }
@@ -287,13 +330,17 @@ function fitPreviewScale() {
   void html.offsetHeight; // 强制 reflow
   const innerW = Math.max(html.scrollWidth, doc.body?.scrollWidth || 0);
   const innerH = Math.max(html.scrollHeight, doc.body?.scrollHeight || 0);
-  const viewW = iframe.clientWidth;
-  const viewH = iframe.clientHeight;
+  // 视口尺寸取容器（preview-wrap），而非 iframe 自己（iframe 接下来要被改成 PPT 尺寸）
+  const viewW = wrap ? wrap.clientWidth : 0;
+  const viewH = wrap ? wrap.clientHeight : 0;
   if (innerW <= 0 || innerH <= 0 || viewW <= 0 || viewH <= 0) return;
-  // 按最小比例缩放，保证完全可见，不放大
+  // 把 iframe 尺寸设成 PPT 实际尺寸
+  iframe.style.width = innerW + 'px';
+  iframe.style.height = innerH + 'px';
+  // 完全可见（不放大）：取宽高方向最小比例
   const scale = Math.min(viewW / innerW, viewH / innerH, 1);
   if (scale < 0.99) {
-    iframe.style.transformOrigin = 'top left';
+    iframe.style.transformOrigin = 'center center';
     iframe.style.transform = `scale(${scale})`;
   }
 }
@@ -1040,6 +1087,491 @@ $('#clearRecentBtn').addEventListener('click', () => {
   if (state.recent.length === 0) return;
   state.recent = []; saveRecent(); renderRecent();
   toast({ type: 'info', msg: '已清空最近打开列表', duration: 1500 });
+});
+
+// ============ 目录树 ============
+const treeList = $('#treeList');
+const fsPromptModal = $('#fsPromptModal');
+const fsPromptTitle = $('#fsPromptTitle');
+const fsPromptHint = $('#fsPromptHint');
+const fsPromptInput = $('#fsPromptInput');
+const fsPromptInputLabel = $('#fsPromptInputLabel');
+const fsPromptTypeRow = $('#fsPromptTypeRow');
+const fsPromptType = $('#fsPromptType');
+const fsPromptConfirm = $('#fsPromptConfirm');
+// 当前 fsPrompt 的上下文：{ mode: 'load-dir'|'create'|'rename'|'delete', path?: string }
+let fsPromptContext = null;
+
+const DIR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+const FILE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+
+// 找到 path 所属的根目录
+function findTreeRoot(p) {
+  let best = null;
+  for (const d of state.treeDirs) {
+    if (p === d || p.startsWith(d + '/')) {
+      if (!best || d.length > best.length) best = d;
+    }
+  }
+  return best;
+}
+
+// 加载一个目录到树
+async function loadTreeDir(dir) {
+  dir = dir.replace(/\/+$/, '');
+  if (!dir) return;
+  if (state.treeDirs.includes(dir)) {
+    toast({ type: 'info', msg: '目录已加载: ' + dir.split('/').pop(), duration: 1500 });
+    return;
+  }
+  let j;
+  try {
+    const r = await fetch(`/api/tree?dir=${encodeURIComponent(dir)}&depth=3`);
+    j = await r.json();
+  } catch (e) {
+    toast({ type: 'error', msg: '加载失败: ' + e.message });
+    return;
+  }
+  if (!j.tree) {
+    toast({ type: 'error', msg: j.error || '目录不存在或不可读' });
+    return;
+  }
+  state.treeDirs.push(dir);
+  state.treeCache[dir] = j.tree;
+  state.treeExpanded[dir] = true; // 新加的根默认展开
+  saveTreeDirs();
+  saveTreeExpanded();
+  renderTree();
+  toast({ type: 'success', msg: '已加载: ' + dir.split('/').pop(), duration: 1500 });
+}
+
+// 刷新某个根目录的缓存（CRUD 后调用）
+async function refreshTreeRoot(rootDir) {
+  if (!state.treeDirs.includes(rootDir)) return;
+  try {
+    const r = await fetch(`/api/tree?dir=${encodeURIComponent(rootDir)}&depth=3`);
+    const j = await r.json();
+    if (j.tree) {
+      state.treeCache[rootDir] = j.tree;
+      renderTree();
+    }
+  } catch {}
+}
+
+function renderTree() {
+  if (!treeList) return;
+  if (state.treeDirs.length === 0) {
+    treeList.innerHTML = '<div class="sidebar-empty">点击右上 + 加载目录<br/>或拖入目录路径</div>';
+    return;
+  }
+  treeList.innerHTML = '';
+  state.treeDirs.forEach((dir) => {
+    const root = document.createElement('div');
+    root.className = 'tree-root';
+    const cleanName = dir.replace(/\/+$/, '');
+    const node = {
+      name: cleanName.split('/').pop() || dir,
+      path: dir,
+      type: 'dir',
+      isRoot: true,
+      children: state.treeCache[dir] || [],
+    };
+    root.appendChild(renderTreeNode(node, 0));
+    treeList.appendChild(root);
+  });
+}
+
+function renderTreeNode(node, depth) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tree-node-wrap';
+
+  const el = document.createElement('div');
+  const isExpanded = !!state.treeExpanded[node.path];
+  el.className = `tree-node type-${node.type}${node.isRoot ? ' is-root' : ''}${node.path === state.currentFile ? ' active' : ''}`;
+  el.style.paddingLeft = (8 + depth * 14) + 'px';
+  el.dataset.path = node.path;
+  el.dataset.type = node.type;
+
+  const chevron = node.type === 'dir'
+    ? `<span class="tree-chevron">${isExpanded ? '▾' : '▸'}</span>`
+    : `<span class="tree-chevron"></span>`;
+  const icon = `<span class="tree-ico">${node.type === 'dir' ? DIR_ICON : FILE_ICON}</span>`;
+  const name = `<span class="tree-name" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</span>`;
+  // 根节点不允许 hide（否则等于移除根，用清空目录树即可）
+  const canHide = node.type === 'dir' && !node.isRoot;
+  const actions = `
+    <span class="tree-actions">
+      ${node.type === 'dir' ? `<button data-action="new" title="新建"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>` : ''}
+      ${canHide ? `<button data-action="hide" title="屏蔽此文件夹（可在 header 还原）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg></button>` : ''}
+      <button data-action="rename" title="重命名"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+      <button data-action="delete" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
+    </span>`;
+
+  el.innerHTML = chevron + icon + name + actions;
+  el.addEventListener('click', handleTreeNodeClick);
+  wrapper.appendChild(el);
+
+  // 渲染展开的子节点（跳过被屏蔽的）
+  if (node.type === 'dir' && isExpanded && Array.isArray(node.children)) {
+    node.children.forEach((child) => {
+      if (child.type === 'dir' && state.treeHidden[child.path]) return;
+      wrapper.appendChild(renderTreeNode(child, depth + 1));
+    });
+  }
+  return wrapper;
+}
+
+async function handleTreeNodeClick(ev) {
+  const el = ev.target.closest('.tree-node');
+  if (!el) return;
+  const p = el.dataset.path;
+  const type = el.dataset.type;
+
+  // 操作按钮优先
+  const actionEl = ev.target.closest('[data-action]');
+  if (actionEl) {
+    ev.stopPropagation();
+    const action = actionEl.dataset.action;
+    if (action === 'new') openFsCreateModal(p);
+    else if (action === 'hide') {
+      state.treeHidden[p] = true;
+      saveTreeHidden();
+      renderTree();
+      updateHiddenBtnBadge();
+      toast({ type: 'info', msg: '已屏蔽: ' + p.split('/').pop(), duration: 1500 });
+    }
+    else if (action === 'rename') openFsRenameModal(p);
+    else if (action === 'delete') openFsDeleteModal(p);
+    return;
+  }
+
+  if (type === 'file') {
+    fileInput.value = p;
+    loadFile(p);
+  } else {
+    // 切换展开（折叠时也保留缓存，不强制刷新；展开时如果之前没缓存则重新拉）
+    if (!state.treeExpanded[p]) {
+      // 展开前确保有 children 缓存，深层目录懒加载
+      const rootDir = findTreeRoot(p);
+      if (rootDir && !state.treeCache[p] && p !== rootDir) {
+        try {
+          const r = await fetch(`/api/tree?dir=${encodeURIComponent(p)}&depth=2`);
+          const j = await r.json();
+          if (j.tree) state.treeCache[p] = j.tree;
+        } catch {}
+      }
+      state.treeExpanded[p] = true;
+    } else {
+      state.treeExpanded[p] = false;
+    }
+    saveTreeExpanded();
+    renderTree();
+  }
+}
+
+// ============ fsPrompt modal ============
+function openFsPrompt({ title, hint, label, value, placeholder, showType, typeChoices, confirmText, danger }) {
+  fsPromptTitle.textContent = title;
+  fsPromptHint.textContent = hint || '';
+  fsPromptHint.style.display = hint ? 'block' : 'none';
+  fsPromptInputLabel.textContent = label || '名称';
+  fsPromptInput.value = value || '';
+  fsPromptInput.placeholder = placeholder || '';
+  fsPromptTypeRow.style.display = showType ? 'block' : 'none';
+  if (typeChoices) {
+    fsPromptType.innerHTML = typeChoices.map((t) => `<option value="${t.value}">${t.label}</option>`).join('');
+  }
+  fsPromptConfirm.textContent = confirmText || '确定';
+  fsPromptConfirm.classList.toggle('danger', !!danger);
+  fsPromptModal.classList.add('open');
+  setTimeout(() => fsPromptInput.focus(), 30);
+}
+
+function closeFsPrompt() {
+  fsPromptModal.classList.remove('open');
+  fsPromptContext = null;
+}
+
+// 加载目录弹窗（输入路径）
+function openLoadDirModal() {
+  fsPromptContext = { mode: 'load-dir' };
+  openFsPrompt({
+    title: '加载目录',
+    hint: '输入目录绝对路径，回车确认',
+    label: '目录路径',
+    placeholder: '/abs/path/to/dir',
+    confirmText: '加载',
+  });
+}
+
+// 新建文件/文件夹
+function openFsCreateModal(dirPath) {
+  fsPromptContext = { mode: 'create', dir: dirPath };
+  openFsPrompt({
+    title: '新建',
+    hint: '在目录：' + dirPath,
+    label: '名称',
+    placeholder: '新建文件请带扩展名，如 page.html',
+    showType: true,
+    typeChoices: [
+      { value: 'file', label: '文件（HTML 默认骨架）' },
+      { value: 'dir', label: '文件夹' },
+    ],
+    confirmText: '新建',
+  });
+}
+
+// 重命名
+function openFsRenameModal(p) {
+  const isDir = state.treeCache[findTreeRoot(p)] && false; // 不靠这个判
+  fsPromptContext = { mode: 'rename', path: p };
+  openFsPrompt({
+    title: '重命名',
+    hint: p,
+    label: '新名称',
+    value: p.split('/').pop(),
+    confirmText: '重命名',
+  });
+}
+
+// 删除（二次确认）
+function openFsDeleteModal(p) {
+  fsPromptContext = { mode: 'delete', path: p };
+  openFsPrompt({
+    title: '确认删除',
+    hint: p,
+    label: '输入 yes 确认删除',
+    placeholder: 'yes',
+    confirmText: '删除',
+    danger: true,
+  });
+}
+
+async function confirmFsPrompt() {
+  if (!fsPromptContext) return;
+  const ctx = fsPromptContext;
+  const val = fsPromptInput.value.trim();
+
+  if (ctx.mode === 'load-dir') {
+    if (!val) return;
+    closeFsPrompt();
+    await loadTreeDir(val);
+    return;
+  }
+
+  if (ctx.mode === 'create') {
+    if (!val) return;
+    const type = fsPromptType.value;
+    const newPath = ctx.dir.replace(/\/+$/, '') + '/' + val;
+    closeFsPrompt();
+    try {
+      const r = await fetch('/api/fs/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: newPath, type }),
+      });
+      const j = await r.json();
+      if (!j.ok) { toast({ type: 'error', msg: j.error || '创建失败' }); return; }
+      toast({ type: 'success', msg: '已创建: ' + val, duration: 1500 });
+      await refreshTreeRoot(findTreeRoot(ctx.dir) || ctx.dir);
+      // 如果是文件，直接加载
+      if (type === 'file') { fileInput.value = newPath; loadFile(newPath); }
+    } catch (e) {
+      toast({ type: 'error', msg: '创建失败: ' + e.message });
+    }
+    return;
+  }
+
+  if (ctx.mode === 'rename') {
+    if (!val) return;
+    const oldName = ctx.path.split('/').pop();
+    if (val === oldName) { closeFsPrompt(); return; }
+    const newPath = ctx.path.split('/').slice(0, -1).join('/') + '/' + val;
+    closeFsPrompt();
+    try {
+      const r = await fetch('/api/fs/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: ctx.path, to: newPath }),
+      });
+      const j = await r.json();
+      if (!j.ok) { toast({ type: 'error', msg: j.error || '重命名失败' }); return; }
+      toast({ type: 'success', msg: '已重命名为: ' + val, duration: 1500 });
+      // 当前加载的文件被重命名 → 切换到新路径
+      if (state.currentFile === ctx.path) {
+        state.currentFile = newPath;
+        fileInput.value = newPath;
+      }
+      await refreshTreeRoot(findTreeRoot(ctx.path) || ctx.path);
+    } catch (e) {
+      toast({ type: 'error', msg: '重命名失败: ' + e.message });
+    }
+    return;
+  }
+
+  if (ctx.mode === 'delete') {
+    if (val !== 'yes') {
+      toast({ type: 'info', msg: '未输入 yes，已取消', duration: 1500 });
+      return;
+    }
+    closeFsPrompt();
+    try {
+      const r = await fetch('/api/fs/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: ctx.path }),
+      });
+      const j = await r.json();
+      if (!j.ok) { toast({ type: 'error', msg: j.error || '删除失败' }); return; }
+      toast({ type: 'success', msg: '已删除: ' + ctx.path.split('/').pop(), duration: 1500 });
+      await refreshTreeRoot(findTreeRoot(ctx.path) || ctx.path);
+    } catch (e) {
+      toast({ type: 'error', msg: '删除失败: ' + e.message });
+    }
+    return;
+  }
+}
+
+// fsPromptModal 事件
+$('#fsPromptClose').addEventListener('click', closeFsPrompt);
+$('#fsPromptCancel').addEventListener('click', closeFsPrompt);
+$('#fsPromptConfirm').addEventListener('click', confirmFsPrompt);
+fsPromptModal.addEventListener('click', (ev) => { if (ev.target === fsPromptModal) closeFsPrompt(); });
+fsPromptInput.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') { ev.preventDefault(); confirmFsPrompt(); }
+  else if (ev.key === 'Escape') { ev.preventDefault(); closeFsPrompt(); }
+});
+
+// topbar + sidebar header 入口
+$('#openDirBtn').addEventListener('click', openLoadDirModal);
+$('#addTreeDirBtn').addEventListener('click', openLoadDirModal);
+$('#clearTreeDirBtn').addEventListener('click', () => {
+  if (state.treeDirs.length === 0) return;
+  state.treeDirs = [];
+  state.treeExpanded = {};
+  state.treeCache = {};
+  state.treeHidden = {};
+  saveTreeDirs();
+  renderTree();
+  updateHiddenBtnBadge();
+  toast({ type: 'info', msg: '已清空目录树', duration: 1500 });
+});
+
+// ============ 已屏蔽文件夹列表 modal ============
+const hiddenListModal = $('#hiddenListModal');
+const hiddenListBody = $('#hiddenListBody');
+const hiddenListCount = $('#hiddenListCount');
+const hiddenBadge = $('#hiddenBadge');
+
+function hiddenCount() {
+  return Object.keys(state.treeHidden).filter((k) => state.treeHidden[k]).length;
+}
+
+// 更新 header 按钮上的红色数字徽章
+function updateHiddenBtnBadge() {
+  const n = hiddenCount();
+  if (n > 0) {
+    hiddenBadge.style.display = 'flex';
+    hiddenBadge.textContent = String(n);
+  } else {
+    hiddenBadge.style.display = 'none';
+  }
+}
+
+function renderHiddenList() {
+  const paths = Object.keys(state.treeHidden).filter((k) => state.treeHidden[k]);
+  paths.sort();
+  hiddenListCount.textContent = paths.length === 0 ? '没有已屏蔽的文件夹' : `${paths.length} 个已屏蔽`;
+  if (paths.length === 0) {
+    hiddenListBody.innerHTML = '<div style="padding:32px; text-align:center; color:var(--text-muted); font-size:12px;">当前没有屏蔽任何文件夹</div>';
+    return;
+  }
+  hiddenListBody.innerHTML = '';
+  paths.forEach((p) => {
+    const row = document.createElement('div');
+    row.className = 'hidden-row';
+    row.innerHTML = `
+      <span class="hidden-row-ico">${DIR_ICON}</span>
+      <span class="hidden-row-path" title="${escapeHtml(p)}">${escapeHtml(p)}</span>
+      <button class="btn btn-secondary" data-restore="${escapeHtml(p)}" style="padding:3px 10px; font-size:11px;">恢复</button>
+    `;
+    hiddenListBody.appendChild(row);
+  });
+}
+
+hiddenListBody.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-restore]');
+  if (!btn) return;
+  const p = btn.dataset.restore;
+  delete state.treeHidden[p];
+  saveTreeHidden();
+  // 恢复时把父目录也展开，否则用户看不到效果
+  const root = findTreeRoot(p);
+  if (root) {
+    // 沿路径展开所有祖先
+    const rootParts = root.split('/');
+    const parts = p.split('/');
+    for (let i = rootParts.length + 1; i <= parts.length; i++) {
+      const anc = parts.slice(0, i).join('/');
+      if (anc !== p) state.treeExpanded[anc] = true;
+    }
+  }
+  renderTree();
+  updateHiddenBtnBadge();
+  renderHiddenList();
+});
+
+$('#hiddenTreeBtn').addEventListener('click', () => {
+  renderHiddenList();
+  hiddenListModal.classList.add('open');
+});
+$('#hiddenListClose').addEventListener('click', () => hiddenListModal.classList.remove('open'));
+$('#hiddenListCancel').addEventListener('click', () => hiddenListModal.classList.remove('open'));
+hiddenListModal.addEventListener('click', (ev) => {
+  if (ev.target === hiddenListModal) hiddenListModal.classList.remove('open');
+});
+$('#hiddenListRestoreAll').addEventListener('click', () => {
+  if (hiddenCount() === 0) return;
+  // 把每个屏蔽路径的祖先全部展开，让用户能看见
+  Object.keys(state.treeHidden).forEach((p) => {
+    const root = findTreeRoot(p);
+    if (root) {
+      const rootParts = root.split('/');
+      const parts = p.split('/');
+      for (let i = rootParts.length + 1; i <= parts.length; i++) {
+        const anc = parts.slice(0, i).join('/');
+        if (anc !== p) state.treeExpanded[anc] = true;
+      }
+    }
+  });
+  state.treeHidden = {};
+  saveTreeHidden();
+  saveTreeExpanded();
+  renderTree();
+  updateHiddenBtnBadge();
+  renderHiddenList();
+  toast({ type: 'success', msg: '已恢复全部屏蔽文件夹', duration: 1500 });
+});
+
+// 首次渲染 + 启动时恢复（从 localStorage 拉，磁盘可能已变）
+renderTree();
+updateHiddenBtnBadge();
+state.treeDirs.forEach((dir) => {
+  fetch(`/api/tree?dir=${encodeURIComponent(dir)}&depth=3`)
+    .then((r) => r.json())
+    .then((j) => {
+      if (j.tree) {
+        state.treeCache[dir] = j.tree;
+        renderTree();
+      } else {
+        // 目录已不存在，从列表里剔除
+        state.treeDirs = state.treeDirs.filter((d) => d !== dir);
+        saveTreeDirs();
+        renderTree();
+        toast({ type: 'info', msg: '目录已不存在，已移除: ' + dir.split('/').pop(), duration: 2000 });
+      }
+    })
+    .catch(() => {});
 });
 
 // 拖拽文件到侧栏 → 自动加载路径

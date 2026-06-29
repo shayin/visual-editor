@@ -182,11 +182,11 @@ input, select, textarea { font-family: inherit; color: inherit; }
    ============================================================ */
 .main {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 2fr 1px 1fr;
+  grid-template-columns: var(--sidebar-w) 7fr 1px 2.2fr;
   min-height: 0;
   position: relative;
 }
-.main.no-sidebar { grid-template-columns: 0 1fr 1px 1fr; }
+.main.no-sidebar { grid-template-columns: 0 7fr 1px 2.2fr; }
 .main.no-sidebar .sidebar { display: none; }
 
 /* Resizer handles */
@@ -211,7 +211,10 @@ input, select, textarea { font-family: inherit; color: inherit; }
   border-bottom: 1px solid var(--border-subtle);
   display: flex; flex-direction: column; min-height: 0;
 }
-.sidebar-section.recent { flex: 1; min-height: 200px; }
+.sidebar-section.recent { flex-shrink: 0; max-height: 240px; min-height: 100px; }
+.sidebar-section.tree { flex: 1; min-height: 200px; }
+.sidebar-section.recent .sidebar-list { max-height: 200px; }
+.tree-list { overflow-y: auto; }
 .sidebar-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px var(--sp-3); font-size: 11px; font-weight: 600;
@@ -247,6 +250,70 @@ input, select, textarea { font-family: inherit; color: inherit; }
   outline-offset: -4px;
   background: var(--accent-soft);
 }
+
+/* ============================================================
+   Tree (目录树)
+   ============================================================ */
+.tree-root {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 2px 0;
+}
+.tree-root:last-child { border-bottom: none; }
+.tree-node {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px; cursor: pointer; border-radius: var(--r-sm);
+  font-size: 12px; color: var(--text-secondary);
+  position: relative; transition: background var(--t-fast);
+  user-select: none;
+}
+.tree-node:hover { background: var(--bg-surface-3); color: var(--text-primary); }
+.tree-node.active { background: var(--accent-soft); color: var(--accent); }
+.tree-node.type-dir { font-weight: 500; color: var(--text-primary); }
+.tree-node.is-root > .tree-name { font-weight: 600; }
+.tree-chevron {
+  width: 12px; flex-shrink: 0; text-align: center;
+  opacity: 0.6; font-size: 10px;
+}
+.tree-ico { flex-shrink: 0; display: flex; align-items: center; }
+.tree-node.type-dir .tree-ico { color: #f59e0b; }
+.tree-node.type-file .tree-ico { color: var(--text-muted); }
+.tree-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-actions {
+  display: none; gap: 1px; flex-shrink: 0;
+}
+.tree-node:hover .tree-actions { display: flex; }
+.tree-actions button {
+  background: transparent; border: none; color: var(--text-muted);
+  cursor: pointer; padding: 3px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+}
+.tree-actions button:hover { background: var(--bg-surface-2); color: var(--text-primary); }
+.tree-actions button[data-action="delete"]:hover { color: #ef4444; }
+.tree-actions button[data-action="hide"]:hover { color: #f59e0b; }
+
+/* 屏蔽徽章 + 已屏蔽列表 */
+.tree-badge {
+  position: absolute; top: -3px; right: -3px;
+  min-width: 13px; height: 13px; padding: 0 3px;
+  background: #ef4444; color: #fff;
+  font: 9px/13px var(--font-mono);
+  border-radius: 7px; text-align: center;
+  display: flex; align-items: center; justify-content: center;
+}
+.hidden-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 4px; border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+.hidden-row:last-child { border-bottom: none; }
+.hidden-row-ico { flex-shrink: 0; color: #f59e0b; display: flex; }
+.hidden-row-path {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 11px/1.4 var(--font-mono); color: var(--text-secondary);
+}
+
 
 /* ============================================================
    Panel (preview / terminal)
@@ -291,6 +358,13 @@ input, select, textarea { font-family: inherit; color: inherit; }
 
 .preview-wrap {
   flex: 1; position: relative; overflow: hidden; background: #fff;
+}
+/* 有文件时让 iframe 居中显示，避免按比例缩放后右侧/下方出现非对称空白 */
+.preview-wrap:not(.no-file) {
+  display: flex; align-items: center; justify-content: center;
+}
+.preview-wrap:not(.no-file) > .preview-iframe {
+  flex-shrink: 0; max-width: none; max-height: none;
 }
 .preview-wrap.no-file {
   display: flex; align-items: center; justify-content: center;
@@ -772,6 +846,8 @@ input, select, textarea { font-family: inherit; color: inherit; }
 }
 .btn-primary { background: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent-hover); }
+.btn-primary.danger { background: #dc2626; }
+.btn-primary.danger:hover { background: #b91c1c; }
 .btn-secondary { background: var(--bg-surface-3); color: var(--text-secondary); }
 .btn-secondary:hover { background: var(--bg-hover); color: var(--text-primary); }
 

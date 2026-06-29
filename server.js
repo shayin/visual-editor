@@ -290,6 +290,101 @@ app.post('/api/upload-image', (req, res) => {
   res.json({ ok: true, absPath, relativePath: filename, filename, size: fs.statSync(absPath).size });
 });
 
+// ============================================================
+// 目录树 + 文件 CRUD（侧栏目录树用）
+// ============================================================
+
+// 递归列目录，返回嵌套结构（depth 限制防过深）
+app.get('/api/tree', (req, res) => {
+  const dir = path.resolve(String(req.query.dir || ''));
+  const depth = Math.min(parseInt(req.query.depth) || 3, 5);
+  if (!fs.existsSync(dir)) return res.status(404).json({ error: 'dir not found: ' + dir });
+  const walk = (d, cur) => {
+    if (cur > depth) return null;
+    let st;
+    try { st = fs.statSync(d); } catch { return null; }
+    if (!st.isDirectory()) return null;
+    const items = fs.readdirSync(d, { withFileTypes: true })
+      .filter((e) => !e.name.startsWith('.')) // 跳过隐藏
+      .map((e) => {
+        const p = path.join(d, e.name);
+        const node = { name: e.name, path: p, type: e.isDirectory() ? 'dir' : 'file' };
+        if (node.type === 'dir') {
+          node.children = walk(p, cur + 1) || [];
+        } else {
+          node.ext = path.extname(e.name).toLowerCase();
+        }
+        return node;
+      })
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1; // 目录在前
+        return a.name.localeCompare(b.name);
+      });
+    return items;
+  };
+  res.json({ dir, tree: walk(dir, 0) });
+});
+
+// 创建文件或目录
+app.post('/api/fs/create', (req, res) => {
+  const { path: p, type } = req.body || {};
+  if (!p || !type) return res.status(400).json({ error: 'missing path/type' });
+  const abs = path.resolve(String(p));
+  if (fs.existsSync(abs)) return res.status(409).json({ error: 'already exists: ' + abs });
+  try {
+    if (type === 'dir') {
+      fs.mkdirSync(abs, { recursive: true });
+    } else if (type === 'file') {
+      // 默认空 HTML 骨架
+      const ext = path.extname(abs).toLowerCase();
+      let content = '';
+      if (ext === '.html' || ext === '.htm') {
+        content = '<!DOCTYPE html>\n<html lang="zh">\n<head>\n  <meta charset="UTF-8">\n  <title>Untitled</title>\n</head>\n<body>\n</body>\n</html>\n';
+      }
+      // 确保父目录存在
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+    } else {
+      return res.status(400).json({ error: 'invalid type: ' + type });
+    }
+    res.json({ ok: true, path: abs });
+  } catch (e) {
+    res.status(403).json({ error: e.message });
+  }
+});
+
+// 重命名（移动）
+app.post('/api/fs/rename', (req, res) => {
+  const { from, to } = req.body || {};
+  if (!from || !to) return res.status(400).json({ error: 'missing from/to' });
+  const fromAbs = path.resolve(String(from));
+  const toAbs = path.resolve(String(to));
+  if (!fs.existsSync(fromAbs)) return res.status(404).json({ error: 'from not found: ' + fromAbs });
+  if (fs.existsSync(toAbs)) return res.status(409).json({ error: 'target exists: ' + toAbs });
+  try {
+    fs.renameSync(fromAbs, toAbs);
+    res.json({ ok: true, from: fromAbs, to: toAbs });
+  } catch (e) {
+    res.status(403).json({ error: e.message });
+  }
+});
+
+// 删除（文件或递归目录）
+app.post('/api/fs/delete', (req, res) => {
+  const { path: p } = req.body || {};
+  if (!p) return res.status(400).json({ error: 'missing path' });
+  const abs = path.resolve(String(p));
+  if (!fs.existsSync(abs)) return res.status(404).json({ error: 'not found: ' + abs });
+  try {
+    const st = fs.statSync(abs);
+    if (st.isDirectory()) fs.rmSync(abs, { recursive: true });
+    else fs.unlinkSync(abs);
+    res.json({ ok: true, path: abs });
+  } catch (e) {
+    res.status(403).json({ error: e.message });
+  }
+});
+
 const server = http.createServer(app);
 
 // WebSocket：一个端点同时承载终端数据 & 选区事件

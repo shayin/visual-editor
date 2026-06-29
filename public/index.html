@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PPT Visual Editor</title>
-  <link rel="stylesheet" href="/styles.css?v=20260628h" />
+  <link rel="stylesheet" href="/styles.css?v=20260629e" />
   <link rel="stylesheet" href="/xterm/xterm.css" />
 </head>
 <body>
@@ -33,6 +33,9 @@
     </div>
 
     <div class="topbar-actions">
+      <button class="icon-btn" id="openDirBtn" title="打开目录到左侧树">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      </button>
       <button class="icon-btn" id="auditBtn" title="HTML 健康度体检（伪元素 / aiiD）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11H5a2 2 0 0 0-2 2v7h6V11z"/><path d="M19 9h-4v11h6v-7a2 2 0 0 0-2-4z"/><path d="M9 3h6v18H9z"/><path d="M3 9l3-6h12l3 6"/></svg>
       </button>
@@ -61,6 +64,28 @@
   <div class="main" id="main">
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
+      <!-- 目录树 section -->
+      <div class="sidebar-section tree">
+        <div class="sidebar-header">
+          <span>目录</span>
+          <div style="display:flex; gap:2px;">
+            <button class="icon-btn" id="addTreeDirBtn" title="加载目录" style="width:22px;height:22px;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button class="icon-btn" id="hiddenTreeBtn" title="查看/恢复已屏蔽的文件夹" style="width:22px;height:22px; position:relative;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              <span class="tree-badge" id="hiddenBadge" style="display:none;">0</span>
+            </button>
+            <button class="icon-btn" id="clearTreeDirBtn" title="清空目录树" style="width:22px;height:22px;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sidebar-list tree-list" id="treeList">
+          <div class="sidebar-empty">点击右上 + 加载目录<br/>或拖入目录路径</div>
+        </div>
+      </div>
+      <!-- 最近打开 -->
       <div class="sidebar-section recent">
         <div class="sidebar-header">
           <span>最近打开</span>
@@ -449,12 +474,62 @@
   </div>
 </div>
 
+<!-- Filesystem Prompt Modal (新建 / 重命名 / 删除 / 加载目录 共用) -->
+<div class="modal-backdrop" id="fsPromptModal">
+  <div class="modal" style="width:480px;">
+    <div class="modal-head">
+      <div class="modal-title" id="fsPromptTitle">操作</div>
+      <button class="icon-btn" id="fsPromptClose" style="width:24px;height:24px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div id="fsPromptHint" class="setting-help" style="margin-bottom:8px; font-family:var(--font-mono); font-size:11px; color:var(--text-dim); word-break:break-all;"></div>
+      <div id="fsPromptTypeRow" class="setting-group" style="display:none;">
+        <label class="setting-label">类型</label>
+        <select class="setting-select" id="fsPromptType">
+          <option value="file">HTML 文件</option>
+          <option value="dir">文件夹</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label" id="fsPromptInputLabel">名称</label>
+        <input type="text" class="setting-input" id="fsPromptInput" spellcheck="false" autocomplete="off" />
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary" id="fsPromptCancel">取消</button>
+      <button class="btn btn-primary" id="fsPromptConfirm">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- Hidden Folders Modal（查看/恢复已屏蔽的文件夹） -->
+<div class="modal-backdrop" id="hiddenListModal">
+  <div class="modal" style="width:560px;">
+    <div class="modal-head">
+      <div class="modal-title">已屏蔽的文件夹</div>
+      <button class="icon-btn" id="hiddenListClose" style="width:24px;height:24px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div id="hiddenListBody" style="max-height:360px; overflow-y:auto;"></div>
+    </div>
+    <div class="modal-foot">
+      <span id="hiddenListCount" style="font:11px var(--font-mono); color: var(--text-muted); margin-right:auto;"></span>
+      <button class="btn btn-secondary" id="hiddenListCancel">关闭</button>
+      <button class="btn btn-primary" id="hiddenListRestoreAll">全部恢复</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toasts -->
 <div class="toast-container" id="toastContainer"></div>
 
 <script src="/xterm/xterm.js"></script>
 <script src="/xterm/addon-fit.js"></script>
-<script type="module" src="/app.js?v=20260628h"></script>
-<script defer src="/audit.js?v=20260628h"></script>
+<script type="module" src="/app.js?v=20260629c"></script>
+<script defer src="/audit.js?v=20260629b"></script>
 </body>
 </html>
