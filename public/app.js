@@ -357,8 +357,7 @@ function loadFile(file) {
     // 切换文件后刷新目录树高亮（renderTree 已对未初始化情况做了空操作）
     if (typeof renderTree === 'function') renderTree();
     previewWrap.classList.remove('no-file');
-    previewWrap.innerHTML = `<iframe id="previewIframe" class="preview-iframe" src="/api/render?file=${encodeURIComponent(file)}&t=${Date.now()}"></iframe>
-      <div class="preview-hint" title="操作提示"><span class="hint-icon">⌨</span><span class="hint-text" id="hintText">按住 <kbd>Option</kbd> + 点击元素</span></div>`;
+    previewWrap.innerHTML = `<iframe id="previewIframe" class="preview-iframe" src="/api/render?file=${encodeURIComponent(file)}&t=${Date.now()}"></iframe>`;
     // 加载该文件已保存的 marks
     state.marks = loadMarks(file);
     updateMarkCount();
