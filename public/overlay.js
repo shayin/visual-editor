@@ -551,6 +551,17 @@
       applyMarkCursor();
     } else if (d.type === 'ppt-ve-mark-image-src') {
       currentImageSrc = d.src;
+      // 预加载拿原始宽高比，初始绘制时锁比例
+      currentImageRatio = null;
+      if (d.src) {
+        const probe = new Image();
+        probe.onload = () => {
+          if (probe.naturalWidth && probe.naturalHeight) {
+            currentImageRatio = probe.naturalWidth / probe.naturalHeight;
+          }
+        };
+        probe.src = d.src;
+      }
       // 自动切到 image 工具
       markTool = 'image';
       applyMarkCursor();
@@ -602,11 +613,16 @@
   let markColor = '#ef4444';
   let markStrokeWidth = 2;
   let currentImageSrc = null; // mark image 工具当前关联的图片 src
+  let currentImageRatio = null; // 当前图片原始宽高比，初始绘制锁比例用
   let marks = []; // 数据模型
   let drawing = false;
   let drawStart = null;
   let draftEl = null;
   let draftPoints = null;
+  // 裁剪模式状态
+  let cropTargetId = null; // 当前正在裁剪的 image mark id；null = 未在裁剪模式
+  let cropDraft = null; // { x, y, w, h } SVG 坐标，裁剪框当前位置
+  let cropDrag = null; // { dir, startMouse, origRect }
 
   const MARKBOARD_STYLE = `
     #ve-markboard {
@@ -675,6 +691,8 @@
   function onMarkMouseDown(ev) {
     if (!markBoard || !markBoard.classList.contains('active')) return;
     if (ev.button !== 0) return;
+    // 裁剪模式期间，禁止其他绘制/拖动（避免误操作背景标记）
+    if (cropTargetId) return;
     // Option/Alt + 点击：临时穿透 markBoard，选取底层元素（复用 point 模式的 selectElement）
     if (ev.altKey) {
       ev.preventDefault(); ev.stopPropagation();
@@ -746,11 +764,26 @@
   function onMarkMouseMove(ev) {
     if (!drawing) return;
     const p = svgPt(ev);
-    if ((markTool === 'rect' || markTool === 'image') && draftEl && drawStart) {
+    if (markTool === 'rect' && draftEl && drawStart) {
       const x = Math.min(drawStart.x, p.x);
       const y = Math.min(drawStart.y, p.y);
       const w = Math.abs(p.x - drawStart.x);
       const h = Math.abs(p.y - drawStart.y);
+      draftEl.setAttribute('x', x);
+      draftEl.setAttribute('y', y);
+      draftEl.setAttribute('width', w);
+      draftEl.setAttribute('height', h);
+    } else if (markTool === 'image' && draftEl && drawStart) {
+      // 初始绘制锁原始比例（按主导方向）
+      const r = currentImageRatio || 1;
+      const rawW = Math.abs(p.x - drawStart.x);
+      const rawH = Math.abs(p.y - drawStart.y);
+      let w, h;
+      if (rawW >= rawH * r) { w = rawW; h = w / r; }
+      else { h = rawH; w = h * r; }
+      let x = drawStart.x, y = drawStart.y;
+      if (p.x < drawStart.x) x = drawStart.x - w;
+      if (p.y < drawStart.y) y = drawStart.y - h;
       draftEl.setAttribute('x', x);
       draftEl.setAttribute('y', y);
       draftEl.setAttribute('width', w);
@@ -802,10 +835,16 @@
         notifyMarkCreated(m);
       }
     } else if (markTool === 'image' && draftEl && drawStart) {
-      const x = Math.min(drawStart.x, p.x);
-      const y = Math.min(drawStart.y, p.y);
-      const w = Math.abs(p.x - drawStart.x);
-      const h = Math.abs(p.y - drawStart.y);
+      // 初始绘制锁原始比例
+      const r = currentImageRatio || 1;
+      const rawW = Math.abs(p.x - drawStart.x);
+      const rawH = Math.abs(p.y - drawStart.y);
+      let w, h;
+      if (rawW >= rawH * r) { w = rawW; h = w / r; }
+      else { h = rawH; w = h * r; }
+      let x = drawStart.x, y = drawStart.y;
+      if (p.x < drawStart.x) x = drawStart.x - w;
+      if (p.y < drawStart.y) y = drawStart.y - h;
       if (w >= 20 && h >= 20 && currentImageSrc) {
         const m = { id: baseId, type: 'image', x, y, w, h, src: currentImageSrc, ts: Date.now() };
         pushUndo();
@@ -854,6 +893,256 @@
         markBoard.appendChild(node);
       }
     }
+    // 裁剪模式 overlay（蒙版 + 裁剪框 + handle + 顶栏）
+    renderCropOverlay();
+  }
+
+  // ============ 裁剪模式 ============
+  function enterCropMode(markId) {
+    const m = marks.find((x) => x.id === markId);
+    if (!m || m.type !== 'image') return;
+    selectedMarkId = markId;
+    cropTargetId = markId;
+    // 裁剪框初始位置：当前 crop 的可见区，没 crop 就是整张
+    if (m.crop) {
+      cropDraft = {
+        x: m.x + (m.crop.xr || 0) * m.w,
+        y: m.y + (m.crop.yr || 0) * m.h,
+        w: m.crop.wr * m.w,
+        h: m.crop.hr * m.h,
+      };
+    } else {
+      cropDraft = { x: m.x, y: m.y, w: m.w, h: m.h };
+    }
+    renderMarks();
+  }
+
+  function exitCropMode(commit) {
+    const m = marks.find((x) => x.id === cropTargetId);
+    if (commit && m && cropDraft) {
+      // 转成 0..1 比例写入 mark.crop
+      const xr = (cropDraft.x - m.x) / m.w;
+      const yr = (cropDraft.y - m.y) / m.h;
+      const wr = cropDraft.w / m.w;
+      const hr = cropDraft.h / m.h;
+      // 几乎等于整张图就清掉 crop
+      const isFull = xr <= 0.005 && yr <= 0.005 && wr >= 0.995 && hr >= 0.995;
+      if (isFull) {
+        delete m.crop;
+      } else {
+        m.crop = { xr, yr, wr, hr };
+      }
+      pushUndo();
+      notifyMarkSync();
+    }
+    cropTargetId = null;
+    cropDraft = null;
+    cropDrag = null;
+    renderMarks();
+  }
+
+  function renderCropOverlay() {
+    // 清除旧 overlay
+    const oldOverlay = markBoard.querySelectorAll('.ve-crop-overlay');
+    oldOverlay.forEach((n) => n.remove());
+    if (!cropTargetId) return;
+    const m = marks.find((x) => x.id === cropTargetId);
+    if (!m || !cropDraft) return;
+
+    const og = document.createElementNS(ns, 'g');
+    og.classList.add('ve-crop-overlay');
+
+    // 1) 半透明黑色蒙版：图片区四周围（裁剪框外）4 块
+    const mx = cropDraft.x, my = cropDraft.y, mw = cropDraft.w, mh = cropDraft.h;
+    const masks = [
+      // 上：图片顶到裁剪框顶
+      [m.x, m.y, m.w, Math.max(0, my - m.y)],
+      // 下：裁剪框底到图片底
+      [m.x, my + mh, m.w, Math.max(0, (m.y + m.h) - (my + mh))],
+      // 左：图片左到裁剪框左（高度=裁剪框高）
+      [m.x, my, Math.max(0, mx - m.x), mh],
+      // 右：裁剪框右到图片右
+      [mx + mw, my, Math.max(0, (m.x + m.w) - (mx + mw)), mh],
+    ];
+    masks.forEach(([x, y, w, h]) => {
+      if (w <= 0 || h <= 0) return;
+      const r = document.createElementNS(ns, 'rect');
+      r.setAttribute('x', x); r.setAttribute('y', y);
+      r.setAttribute('width', w); r.setAttribute('height', h);
+      r.setAttribute('fill', '#000');
+      r.setAttribute('opacity', '0.45');
+      r.setAttribute('pointer-events', 'none');
+      og.appendChild(r);
+    });
+
+    // 2) 裁剪框边框（绿色虚线）
+    const cb = document.createElementNS(ns, 'rect');
+    cb.setAttribute('x', mx); cb.setAttribute('y', my);
+    cb.setAttribute('width', mw); cb.setAttribute('height', mh);
+    cb.setAttribute('fill', 'none');
+    cb.setAttribute('stroke', '#10b981');
+    cb.setAttribute('stroke-width', '1.5');
+    cb.setAttribute('stroke-dasharray', '4 2');
+    og.appendChild(cb);
+
+    // 3) 8 个裁剪 handle
+    const hs = 9;
+    const cursorMap = {
+      nw: 'nwse-resize', se: 'nwse-resize',
+      ne: 'nesw-resize', sw: 'nesw-resize',
+      n: 'ns-resize', s: 'ns-resize',
+      e: 'ew-resize', w: 'ew-resize',
+    };
+    const handles = [
+      ['nw', mx,        my       ],
+      ['n',  mx + mw/2, my       ],
+      ['ne', mx + mw,   my       ],
+      ['e',  mx + mw,   my + mh/2],
+      ['se', mx + mw,   my + mh  ],
+      ['s',  mx + mw/2, my + mh  ],
+      ['sw', mx,        my + mh  ],
+      ['w',  mx,        my + mh/2],
+    ];
+    handles.forEach(([dir, cx, cy]) => {
+      const h = document.createElementNS(ns, 'rect');
+      h.setAttribute('x', cx - hs / 2);
+      h.setAttribute('y', cy - hs / 2);
+      h.setAttribute('width', hs);
+      h.setAttribute('height', hs);
+      h.setAttribute('fill', '#10b981');
+      h.setAttribute('stroke', '#fff');
+      h.setAttribute('stroke-width', '1');
+      h.setAttribute('rx', 1);
+      h.style.cursor = cursorMap[dir];
+      h.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        e.preventDefault();
+        startCropDrag(e, dir);
+      });
+      og.appendChild(h);
+    });
+
+    // 4) 顶栏：标题 + 完成按钮 + 取消按钮（位于图片上方）
+    const barH = 22;
+    const barW = 180;
+    const barX = m.x + m.w - barW;
+    const barY = m.y - barH - 6;
+    const bar = document.createElementNS(ns, 'rect');
+    bar.setAttribute('x', barX); bar.setAttribute('y', barY);
+    bar.setAttribute('width', barW); bar.setAttribute('height', barH);
+    bar.setAttribute('fill', '#1f2937');
+    bar.setAttribute('rx', 4);
+    bar.setAttribute('pointer-events', 'none');
+    og.appendChild(bar);
+    const title = document.createElementNS(ns, 'text');
+    title.setAttribute('x', barX + 8);
+    title.setAttribute('y', barY + 15);
+    title.setAttribute('fill', '#fff');
+    title.setAttribute('font-size', '11');
+    title.setAttribute('pointer-events', 'none');
+    title.textContent = '裁剪（Esc 取消）';
+    og.appendChild(title);
+
+    const okBtn = document.createElementNS(ns, 'g');
+    const okX = barX + barW - 60;
+    const okRect = document.createElementNS(ns, 'rect');
+    okRect.setAttribute('x', okX); okRect.setAttribute('y', barY + 3);
+    okRect.setAttribute('width', 26); okRect.setAttribute('height', barH - 6);
+    okRect.setAttribute('fill', '#10b981');
+    okRect.setAttribute('rx', 3);
+    okRect.style.cursor = 'pointer';
+    const okTx = document.createElementNS(ns, 'text');
+    okTx.setAttribute('x', okX + 13);
+    okTx.setAttribute('y', barY + 15);
+    okTx.setAttribute('text-anchor', 'middle');
+    okTx.setAttribute('fill', '#fff');
+    okTx.setAttribute('font-size', '11');
+    okTx.setAttribute('pointer-events', 'none');
+    okTx.textContent = '完成';
+    okRect.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      exitCropMode(true);
+    });
+    okBtn.appendChild(okRect);
+    okBtn.appendChild(okTx);
+    og.appendChild(okBtn);
+
+    const noBtn = document.createElementNS(ns, 'g');
+    const noX = barX + barW - 30;
+    const noRect = document.createElementNS(ns, 'rect');
+    noRect.setAttribute('x', noX); noRect.setAttribute('y', barY + 3);
+    noRect.setAttribute('width', 26); noRect.setAttribute('height', barH - 6);
+    noRect.setAttribute('fill', '#6b7280');
+    noRect.setAttribute('rx', 3);
+    noRect.style.cursor = 'pointer';
+    const noTx = document.createElementNS(ns, 'text');
+    noTx.setAttribute('x', noX + 13);
+    noTx.setAttribute('y', barY + 15);
+    noTx.setAttribute('text-anchor', 'middle');
+    noTx.setAttribute('fill', '#fff');
+    noTx.setAttribute('font-size', '11');
+    noTx.setAttribute('pointer-events', 'none');
+    noTx.textContent = '取消';
+    noRect.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      exitCropMode(false);
+    });
+    noBtn.appendChild(noRect);
+    noBtn.appendChild(noTx);
+    og.appendChild(noBtn);
+
+    markBoard.appendChild(og);
+  }
+
+  // 裁剪 handle 拖动：在 mark 矩形内 clamp
+  function startCropDrag(ev, dir) {
+    cropDrag = {
+      dir,
+      startMouse: { x: ev.clientX, y: ev.clientY },
+      origRect: { ...cropDraft },
+    };
+    const onMove = (e) => {
+      if (!cropDrag) return;
+      const m = marks.find((x) => x.id === cropTargetId);
+      if (!m) return;
+      const dx = e.clientX - cropDrag.startMouse.x;
+      const dy = e.clientY - cropDrag.startMouse.y;
+      const o = cropDrag.origRect;
+      const d = cropDrag.dir;
+      const minSize = 12;
+      let nx = o.x, ny = o.y, nw = o.w, nh = o.h;
+      if (d.includes('e')) nw = Math.max(minSize, o.w + dx);
+      if (d.includes('s')) nh = Math.max(minSize, o.h + dy);
+      if (d.includes('w')) {
+        nw = Math.max(minSize, o.w - dx);
+        nx = o.x + (o.w - nw);
+      }
+      if (d.includes('n')) {
+        nh = Math.max(minSize, o.h - dy);
+        ny = o.y + (o.h - nh);
+      }
+      // clamp 在 mark 矩形内
+      nx = Math.max(m.x, nx);
+      ny = Math.max(m.y, ny);
+      if (nx + nw > m.x + m.w) nw = (m.x + m.w) - nx;
+      if (ny + nh > m.y + m.h) nh = (m.y + m.h) - ny;
+      nw = Math.max(minSize, nw);
+      nh = Math.max(minSize, nh);
+      cropDraft = { x: nx, y: ny, w: nw, h: nh };
+      renderMarks();
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      cropDrag = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   }
 
   // —— 拖拽移动标记 ——
@@ -896,13 +1185,16 @@
     window.addEventListener('mouseup', onUp);
   }
 
-  // —— 拖拽缩放标记（仅 image / rect，右下角 handle）——
-  let dragResize = null; // { mark, startMouse, origMark }
-  function startResize(ev, m) {
+  // —— 拖拽缩放标记 ——
+  // rect：保留单个右下角 handle（自由变形）
+  // image：8 个 handle（4 角锁比例 + 4 边单向）
+  let dragResize = null; // { mark, dir, startMouse, origMark }
+  function startResize(ev, m, dir) {
     selectedMarkId = m.id;
     pushUndo();
     dragResize = {
       mark: m,
+      dir: dir || 'se',
       startMouse: { x: ev.clientX, y: ev.clientY },
       origMark: JSON.parse(JSON.stringify(m)),
     };
@@ -912,10 +1204,51 @@
       const dy = e.clientY - dragResize.startMouse.y;
       const o = dragResize.origMark;
       const t = dragResize.mark;
+      const d = dragResize.dir;
       const minSize = 20;
-      if (t.type === 'image' || t.type === 'rect') {
+
+      if (t.type === 'rect') {
+        // rect 永远是右下角自由变形（兼容旧逻辑）
         t.w = Math.max(minSize, o.w + dx);
         t.h = Math.max(minSize, o.h + dy);
+      } else if (t.type === 'image') {
+        const ratio = o.w / o.h; // 锁比例用
+
+        if (d === 'nw' || d === 'ne' || d === 'se' || d === 'sw') {
+          // 角 handle：锁比例，按主导方向（dx/dy 谁的相对变化大）等比缩放
+          const sx = dx / o.w;
+          const sy = dy / o.h;
+          // 对角线方向的拖动：dx/dy 同号才能放大；这里取相对值大的为主轴
+          const s = Math.abs(sx) > Math.abs(sy) ? sx : sy;
+          let newW = Math.max(minSize, o.w * (1 + s));
+          let newH = Math.max(minSize, newW / ratio);
+          if (d === 'se') {
+            // anchor = 左上 (o.x, o.y)
+            t.w = newW; t.h = newH;
+          } else if (d === 'nw') {
+            // anchor = 右下 (o.x+o.w, o.y+o.h)
+            t.x = o.x + o.w - newW; t.y = o.y + o.h - newH; t.w = newW; t.h = newH;
+          } else if (d === 'ne') {
+            // anchor = 左下 (o.x, o.y+o.h)
+            t.y = o.y + o.h - newH; t.w = newW; t.h = newH;
+          } else if (d === 'sw') {
+            // anchor = 右上 (o.x+o.w, o.y)
+            t.x = o.x + o.w - newW; t.w = newW; t.h = newH;
+          }
+        } else {
+          // 边 handle：单向拉伸（不锁比例）
+          if (d === 'e') {
+            t.w = Math.max(minSize, o.w + dx);
+          } else if (d === 'w') {
+            const newW = Math.max(minSize, o.w - dx);
+            t.x = o.x + o.w - newW; t.w = newW;
+          } else if (d === 's') {
+            t.h = Math.max(minSize, o.h + dy);
+          } else if (d === 'n') {
+            const newH = Math.max(minSize, o.h - dy);
+            t.y = o.y + o.h - newH; t.h = newH;
+          }
+        }
       }
       renderMarks();
     };
@@ -995,15 +1328,42 @@
     }
     if (m.type === 'image' && m.src) {
       const g = document.createElementNS(ns, 'g');
-      const img = document.createElementNS(ns, 'image');
-      img.setAttribute('x', m.x);
-      img.setAttribute('y', m.y);
-      img.setAttribute('width', m.w);
-      img.setAttribute('height', m.h);
-      img.setAttribute('preserveAspectRatio', 'none');
-      img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', m.src);
-      img.setAttribute('href', m.src);
-      g.appendChild(img);
+
+      // 有 crop 时用嵌套 svg：外层 svg 占据 (x,y,w,h)，viewBox 是裁剪比例区
+      if (m.crop && m.crop.wr > 0 && m.crop.hr > 0) {
+        const inner = document.createElementNS(ns, 'svg');
+        inner.setAttribute('x', m.x);
+        inner.setAttribute('y', m.y);
+        inner.setAttribute('width', m.w);
+        inner.setAttribute('height', m.h);
+        // viewBox 用 0..1 区间，配 image 的 1×1 单位实现比例裁剪
+        const vbX = (m.crop.xr || 0).toFixed(4);
+        const vbY = (m.crop.yr || 0).toFixed(4);
+        const vbW = m.crop.wr.toFixed(4);
+        const vbH = m.crop.hr.toFixed(4);
+        inner.setAttribute('viewBox', `${vbX} ${vbY} ${vbW} ${vbH}`);
+        inner.setAttribute('preserveAspectRatio', 'none');
+        const img = document.createElementNS(ns, 'image');
+        img.setAttribute('x', 0);
+        img.setAttribute('y', 0);
+        img.setAttribute('width', 1);
+        img.setAttribute('height', 1);
+        img.setAttribute('preserveAspectRatio', 'none');
+        img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', m.src);
+        img.setAttribute('href', m.src);
+        inner.appendChild(img);
+        g.appendChild(inner);
+      } else {
+        const img = document.createElementNS(ns, 'image');
+        img.setAttribute('x', m.x);
+        img.setAttribute('y', m.y);
+        img.setAttribute('width', m.w);
+        img.setAttribute('height', m.h);
+        img.setAttribute('preserveAspectRatio', 'none');
+        img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', m.src);
+        img.setAttribute('href', m.src);
+        g.appendChild(img);
+      }
       // 虚线边框便于辨识
       const border = document.createElementNS(ns, 'rect');
       border.setAttribute('x', m.x);
@@ -1011,28 +1371,116 @@
       border.setAttribute('width', m.w);
       border.setAttribute('height', m.h);
       border.setAttribute('fill', 'none');
-      border.setAttribute('stroke', '#3b82f6');
+      border.setAttribute('stroke', m.crop ? '#10b981' : '#3b82f6'); // 裁剪过用绿色提示
       border.setAttribute('stroke-width', '1');
       border.setAttribute('stroke-dasharray', '4 2');
       g.appendChild(border);
-      // 右下角 resize handle（蓝色实心方块）
-      const hs = 8;
-      const handle = document.createElementNS(ns, 'rect');
-      handle.setAttribute('x', m.x + m.w - hs / 2);
-      handle.setAttribute('y', m.y + m.h - hs / 2);
-      handle.setAttribute('width', hs);
-      handle.setAttribute('height', hs);
-      handle.setAttribute('fill', '#3b82f6');
-      handle.setAttribute('stroke', '#fff');
-      handle.setAttribute('stroke-width', '1');
-      handle.style.cursor = 'nwse-resize';
-      handle.addEventListener('mousedown', (e) => {
+
+      // 裁剪过显示一个小标记（左上角）
+      if (m.crop) {
+        const tag = document.createElementNS(ns, 'g');
+        const tagW = 28, tagH = 14;
+        const tagBg = document.createElementNS(ns, 'rect');
+        tagBg.setAttribute('x', m.x);
+        tagBg.setAttribute('y', m.y - tagH - 2);
+        tagBg.setAttribute('width', tagW);
+        tagBg.setAttribute('height', tagH);
+        tagBg.setAttribute('fill', '#10b981');
+        tagBg.setAttribute('rx', 2);
+        const tagTx = document.createElementNS(ns, 'text');
+        tagTx.setAttribute('x', m.x + tagW / 2);
+        tagTx.setAttribute('y', m.y - tagH / 2 + 4);
+        tagTx.setAttribute('text-anchor', 'middle');
+        tagTx.setAttribute('fill', '#fff');
+        tagTx.setAttribute('font-size', '10');
+        tagTx.textContent = '已裁剪';
+        tag.appendChild(tagBg);
+        tag.appendChild(tagTx);
+        g.appendChild(tag);
+      }
+
+      // 裁剪模式期间隐藏 resize handle，由裁剪 overlay 接管
+      if (cropTargetId === m.id) return g;
+
+      // 8 个 resize handle（4 角锁比例 + 4 边单向）
+      const hs = 9;
+      const ew = 14, eh = 4;
+      const cursorMap = {
+        nw: 'nwse-resize', se: 'nwse-resize',
+        ne: 'nesw-resize', sw: 'nesw-resize',
+        n: 'ns-resize', s: 'ns-resize',
+        e: 'ew-resize', w: 'ew-resize',
+      };
+      const handles = [
+        ['nw', m.x,            m.y,            true],
+        ['n',  m.x + m.w / 2,  m.y,            false],
+        ['ne', m.x + m.w,      m.y,            true],
+        ['e',  m.x + m.w,      m.y + m.h / 2,  false],
+        ['se', m.x + m.w,      m.y + m.h,      true],
+        ['s',  m.x + m.w / 2,  m.y + m.h,      false],
+        ['sw', m.x,            m.y + m.h,      true],
+        ['w',  m.x,            m.y + m.h / 2,  false],
+      ];
+      handles.forEach(([dir, cx, cy, isCorner]) => {
+        const h = document.createElementNS(ns, 'rect');
+        let w, hgt, x, y;
+        if (isCorner) {
+          w = hs; hgt = hs;
+          x = cx - hs / 2; y = cy - hs / 2;
+        } else if (dir === 'n' || dir === 's') {
+          w = ew; hgt = eh;
+          x = cx - ew / 2; y = cy - eh / 2;
+        } else {
+          w = eh; hgt = ew;
+          x = cx - eh / 2; y = cy - ew / 2;
+        }
+        h.setAttribute('x', x);
+        h.setAttribute('y', y);
+        h.setAttribute('width', w);
+        h.setAttribute('height', hgt);
+        h.setAttribute('fill', '#3b82f6');
+        h.setAttribute('stroke', '#fff');
+        h.setAttribute('stroke-width', '1');
+        h.setAttribute('rx', 1);
+        h.style.cursor = cursorMap[dir];
+        h.addEventListener('mousedown', (e) => {
+          if (e.button !== 0) return;
+          if (!markBoard.classList.contains('active')) return;
+          e.stopPropagation();
+          startResize(e, m, dir);
+        });
+        g.appendChild(h);
+      });
+
+      // 裁剪按钮（右上角小圆 + 剪刀图标）
+      const btnR = 10;
+      const btnCx = m.x + m.w - btnR - 2;
+      const btnCy = m.y - btnR - 2;
+      const cropBtn = document.createElementNS(ns, 'circle');
+      cropBtn.setAttribute('cx', btnCx);
+      cropBtn.setAttribute('cy', btnCy);
+      cropBtn.setAttribute('r', btnR);
+      cropBtn.setAttribute('fill', m.crop ? '#10b981' : '#3b82f6');
+      cropBtn.setAttribute('stroke', '#fff');
+      cropBtn.setAttribute('stroke-width', '1');
+      cropBtn.style.cursor = 'pointer';
+      const cropIco = document.createElementNS(ns, 'text');
+      cropIco.setAttribute('x', btnCx);
+      cropIco.setAttribute('y', btnCy + 4);
+      cropIco.setAttribute('text-anchor', 'middle');
+      cropIco.setAttribute('fill', '#fff');
+      cropIco.setAttribute('font-size', '12');
+      cropIco.style.pointerEvents = 'none';
+      cropIco.textContent = '✂';
+      cropBtn.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         if (!markBoard.classList.contains('active')) return;
         e.stopPropagation();
-        startResize(e, m);
+        e.preventDefault();
+        enterCropMode(m.id);
       });
-      g.appendChild(handle);
+      g.appendChild(cropBtn);
+      g.appendChild(cropIco);
       return g;
     }
     return null;
@@ -1093,6 +1541,11 @@
   // 键盘快捷键（仅 mark 模式激活时）
   document.addEventListener('keydown', (ev) => {
     if (!markBoard || !markBoard.classList.contains('active')) return;
+    // 裁剪模式：Esc 取消，Enter / 回车确认
+    if (cropTargetId) {
+      if (ev.key === 'Escape') { ev.preventDefault(); exitCropMode(false); return; }
+      if (ev.key === 'Enter') { ev.preventDefault(); exitCropMode(true); return; }
+    }
     // Ctrl/Cmd + Z 撤销
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
       ev.preventDefault();

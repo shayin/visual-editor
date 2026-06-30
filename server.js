@@ -118,7 +118,7 @@ app.get('/api/render', (req, res) => {
   const dirB64 = Buffer.from(dir, 'utf8').toString('base64url');
   // <base> 末尾的斜杠很关键，否则相对路径会丢最后一段
   const baseTag = `<base href="/api/asset/${dirB64}/">`;
-  const overlayTag = `<script src="/overlay.js"></script>`;
+  const overlayTag = `<script src="/overlay.js?v=20260629a"></script>`;
 
   let html = fs.readFileSync(abs, 'utf8');
   // 注意：overlay.js 是绝对路径不受 base 影响，但要在 base 之后注入以防万一

@@ -382,9 +382,26 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .preview-hint {
   position: absolute; top: 12px; left: 12px; z-index: 5;
   background: rgba(10, 12, 16, 0.85); color: #e6e9ef;
-  font-size: 11px; padding: 6px 12px; border-radius: var(--r-md);
-  backdrop-filter: blur(8px); display: flex; align-items: center; gap: var(--sp-2);
-  pointer-events: none;
+  font-size: 11px; padding: 5px 9px; border-radius: var(--r-md);
+  backdrop-filter: blur(8px); display: flex; align-items: center; gap: 6px;
+  cursor: default; user-select: none;
+  transition: background 200ms ease;
+}
+.preview-hint .hint-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; font-size: 12px; opacity: 0.6;
+}
+.preview-hint .hint-text {
+  max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap;
+  transition: max-width 220ms ease, opacity 180ms ease, margin 220ms ease;
+  margin-left: -6px;
+}
+.preview-hint:hover {
+  background: rgba(10, 12, 16, 0.95);
+}
+.preview-hint:hover .hint-icon { opacity: 1; }
+.preview-hint:hover .hint-text {
+  max-width: 220px; opacity: 1; margin-left: 0;
 }
 .preview-hint kbd {
   font: 10px var(--font-mono); background: rgba(99, 102, 241, 0.3);

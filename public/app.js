@@ -354,9 +354,11 @@ function loadFile(file) {
   }).then(info => {
     state.currentFile = file;
     localStorage.setItem('ve-current-file', file); // 持久化，刷新后恢复
+    // 切换文件后刷新目录树高亮（renderTree 已对未初始化情况做了空操作）
+    if (typeof renderTree === 'function') renderTree();
     previewWrap.classList.remove('no-file');
     previewWrap.innerHTML = `<iframe id="previewIframe" class="preview-iframe" src="/api/render?file=${encodeURIComponent(file)}&t=${Date.now()}"></iframe>
-      <div class="preview-hint"><span id="hintText">按住 <kbd>Option</kbd> + 点击元素</span></div>`;
+      <div class="preview-hint" title="操作提示"><span class="hint-icon">⌨</span><span class="hint-text" id="hintText">按住 <kbd>Option</kbd> + 点击元素</span></div>`;
     // 加载该文件已保存的 marks
     state.marks = loadMarks(file);
     updateMarkCount();
@@ -983,7 +985,14 @@ function buildMarkPacket(file, marks) {
       const pts = m.points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
       lines.push(`  <pen stroke="${m.stroke || '#ef4444'}" points="${pts}" />`);
     } else if (m.type === 'image') {
-      lines.push(`  <image src="${m.src}" rect="${Math.round(m.x)},${Math.round(m.y)},${Math.round(m.w)},${Math.round(m.h)}" />`);
+      const rectStr = `${Math.round(m.x)},${Math.round(m.y)},${Math.round(m.w)},${Math.round(m.h)}`;
+      if (m.crop) {
+        const c = m.crop;
+        const cropPct = `裁剪区域=(x:${(c.xr * 100).toFixed(1)}%, y:${(c.yr * 100).toFixed(1)}%, w:${(c.wr * 100).toFixed(1)}%, h:${(c.hr * 100).toFixed(1)}%)`;
+        lines.push(`  <image src="${m.src}" rect="${rectStr}" cropped="true" crop="${cropPct}" />`);
+      } else {
+        lines.push(`  <image src="${m.src}" rect="${rectStr}" />`);
+      }
     }
   }
   lines.push(`</annotations>`);
@@ -991,10 +1000,15 @@ function buildMarkPacket(file, marks) {
   lines.push(`坐标说明：x,y 是相对浏览器视口左上角的像素位置；rect 是 "左上x,左上y,宽,高"。`);
   lines.push(`请根据这些坐标定位空白区域，参考附近已有元素的位置和布局，在该位置做我接下来要的修改。`);
   const hasImage = marks.some((m) => m.type === 'image');
+  const hasCropped = marks.some((m) => m.type === 'image' && m.crop);
   if (hasImage) {
     lines.push(``);
     lines.push(`🖼 关于 image 标记：src 是相对 HTML 文件的图片路径（图片已存在于 HTML 同目录），rect 是要插入的新 <img> 在视口里的目标位置和尺寸。`);
     lines.push(`   请在该位置新建一个 <img src="..."> 元素，宽高用 rect 的 w,h；定位用 absolute 或视布局而定，让 img 占据该区域。`);
+    if (hasCropped) {
+      lines.push(`   ✂ 对于 cropped="true" 的 image：用户已对该图片做了非破坏性裁剪，crop 属性的百分比表示从原图取哪一部分（x,y 是左上角偏移比例，w,h 是裁出区域的宽高比例）。`);
+      lines.push(`   请用 object-fit: cover + object-position / 或 background-image + background-position + background-size 还原该裁剪效果，让最终视觉与用户在编辑器里看到的一致。`);
+    }
   }
   return lines.join('\n');
 }
@@ -1883,7 +1897,13 @@ function serializeMarksToSvg(marks) {
       const pts = m.points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
       parts.push(`<polyline${ns} points="${pts}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" />`);
     } else if (m.type === 'image' && m.src) {
-      parts.push(`<image${ns} x="${Math.round(m.x)}" y="${Math.round(m.y)}" width="${Math.round(m.w)}" height="${Math.round(m.h)}" preserveAspectRatio="none" href="${m.src}" xlink:href="${m.src}" />`);
+      if (m.crop) {
+        // 非破坏性裁剪：嵌套 svg + viewBox（0..1 比例空间）实现，外框尺寸不变
+        const c = m.crop;
+        parts.push(`<g${ns}><svg${ns} x="${Math.round(m.x)}" y="${Math.round(m.y)}" width="${Math.round(m.w)}" height="${Math.round(m.h)}" viewBox="${c.xr} ${c.yr} ${c.wr} ${c.hr}" preserveAspectRatio="none"><image x="0" y="0" width="1" height="1" preserveAspectRatio="none" href="${m.src}" xlink:href="${m.src}" /></svg></g>`);
+      } else {
+        parts.push(`<image${ns} x="${Math.round(m.x)}" y="${Math.round(m.y)}" width="${Math.round(m.w)}" height="${Math.round(m.h)}" preserveAspectRatio="none" href="${m.src}" xlink:href="${m.src}" />`);
+      }
     }
   }
   return parts.join('\n    ');
